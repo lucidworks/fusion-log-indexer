@@ -10,6 +10,8 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
+import org.apache.commons.io.input.Tailer;
+import org.apache.commons.io.input.TailerListenerAdapter;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
@@ -33,18 +35,8 @@ import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
-import java.text.DateFormat;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.Date;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TimeZone;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -83,6 +75,22 @@ public class LogIndexer {
                     .isRequired(false)
                     .withDescription("Regex to match log files in the watched directory, default is *.log")
                     .create("match"),
+            OptionBuilder
+                    .isRequired(false)
+                    .withDescription("Tail matched files for new log entries")
+                    .create("tail"),
+            OptionBuilder
+                    .withArgName("MS")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Tail delay in milliseconds; default is 500")
+                    .create("tailerDelayMs"),
+            OptionBuilder
+                    .withArgName("MS")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Stop tailing a file if no new events have arrived since this threshold in milliseconds, default is 120000 (2 minutes)")
+                    .create("tailerReaperThresholdMs"),
             OptionBuilder
                     .withArgName("FILE")
                     .hasArg()
@@ -215,6 +223,9 @@ public class LogIndexer {
   protected Grok grok = null;
   protected Integer minLineLength = null;
   protected String idFieldName;
+  protected boolean tail = false;
+  protected long tailerDelayMs = 500;
+  protected TailerReaperThread tailerReaperBgThread = null;
 
   private static final MetricRegistry metrics = new MetricRegistry();
   private static ConsoleReporter reporter = null;
@@ -250,6 +261,15 @@ public class LogIndexer {
         log.error("No log files matching "+match+" found in " + logDir.getAbsolutePath());
         return;
       }
+    }
+
+    tail = cli.hasOption("tail");
+    if (tail) {
+      tailerDelayMs = Long.parseLong(cli.getOptionValue("tailerDelayMs","500"));
+      tailerReaperBgThread = new TailerReaperThread();
+      tailerReaperBgThread.thresholdMs = Long.parseLong(cli.getOptionValue("tailerReaperThresholdMs", "120000"));
+      tailerReaperBgThread.start();
+      log.info("Started the tailer reaper background thread ("+tailerReaperBgThread+") with threshold: "+tailerReaperBgThread.thresholdMs);
     }
 
     // setup grok
@@ -427,7 +447,7 @@ public class LogIndexer {
         log.info("Skipping already processed: " + fileName);
         continue;
       }
-      pool.submit(new FileParser(this, logDir, file, 0));
+      pool.submit(new FileParser(this, file, 0));
       totalFiles.incrementAndGet();
     }
 
@@ -514,7 +534,7 @@ public class LogIndexer {
     }
   }
 
-  protected Map<String,Object> parseLogLine(String dirName, String fileName, int lineNum, String line, DateFormat dateParser) {
+  protected Map<String,Object> parseLogLine(String fileName, int lineNum, String line) throws Exception {
     if (minLineLength != null && line.length() < minLineLength) {
       log.error("Ignoring line " + lineNum + " in " + fileName + " due to: line is too short; " + line);
       return null;
@@ -548,10 +568,15 @@ public class LogIndexer {
       }
     } else {
       Map<String,Object> doc = new HashMap<String,Object>(3);
-      doc.put("id", String.format("%s/%d", fileName, lineNum));
-      List fields = new ArrayList(1);
-      fields.add(mapField("_raw_content_", line));
-      doc.put("fields", fields);
+      if (line.startsWith("{") && line.endsWith("}")) {
+        // treat as JSON
+        Map jsonMap = jsonMapper.readValue(line, Map.class);
+      } else {
+        doc.put("id", String.format("%s/%d", fileName, lineNum));
+        List fields = new ArrayList(1);
+        fields.add(mapField("_raw_content_", line));
+        doc.put("fields", fields);
+      }
       return doc;
     }
 
@@ -691,13 +716,13 @@ public class LogIndexer {
                     }
                   });
                   for (File next : inDir) {
-                    pool.submit(new FileParser(logIndexer, dir, next, 0));
+                    pool.submit(new FileParser(logIndexer, next, 0));
                     log.info("Scheduled new file '" + next + "' for parsing.");
                     totalFiles.incrementAndGet();
                   }
                 }
               } else {
-                pool.submit(new FileParser(logIndexer, dir, newFile, 0));
+                pool.submit(new FileParser(logIndexer, newFile, 0));
                 log.info("Scheduled new file '" + newFile + "' for parsing.");
                 totalFiles.incrementAndGet();
               }
@@ -714,22 +739,82 @@ public class LogIndexer {
   }
 
   // Runs in a thread pool to parse files in-parallel
-  class FileParser implements Runnable {
+  class FileParser extends TailerListenerAdapter implements Runnable {
 
-    private File logDir;
     private File fileToParse;
     private String fileName;
     private int skipOver;
     private LogIndexer logIndexer;
-    private DateFormat dateParser;
+    private List batchOfDocs;
+    private int lineNum = 0;
+    private int skippedLines = 0;
+    private long startMs;
+    private long lastEventAtMs = 0l;
+    private Tailer tailer = null;
 
-    FileParser(LogIndexer logIndexer, File logDir, File fileToParse, int skipOver) {
+    FileParser(LogIndexer logIndexer, File fileToParse, int skipOver) {
       this.logIndexer = logIndexer;
-      this.logDir = logDir;
       this.fileToParse = fileToParse;
       this.fileName = fileToParse.getAbsolutePath();
       this.skipOver = skipOver;
-      this.dateParser = new SimpleDateFormat("yyyy-MMM dd HH:mm:ss");
+      this.batchOfDocs = new ArrayList(logIndexer.fusionBatchSize);
+      this.lineNum = 0;
+      this.startMs = 0L;
+    }
+
+    public void handle(String line) {
+      if (tailer != null) {
+        lastEventAtMs = System.currentTimeMillis();
+      }
+
+      logIndexer.linesRead.incrementAndGet();
+
+      ++lineNum;
+
+      if (lineNum < skipOver) {
+        // support for skipping over lines
+        return;
+      }
+
+      line = line.trim();
+      if (line.length() == 0)
+        return;
+
+      Map<String,Object> doc = null;
+      try {
+        doc = logIndexer.parseLogLine(fileName, lineNum, line);
+      } catch (Exception exc) {
+        // TODO: guard against flood of errors here
+        log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
+      }
+
+      if (doc != null) {
+        batchOfDocs.add(doc);
+        docCounter.incrementAndGet();
+
+        if (batchOfDocs.size() >= logIndexer.fusionBatchSize) {
+          try {
+            logIndexer.fusion.postBatchToPipeline(batchOfDocs);
+          } catch (Exception exc) {
+            if (exc instanceof RuntimeException) {
+              throw (RuntimeException)exc;
+            } else {
+              throw new RuntimeException(exc);
+            }
+          } finally {
+            batchOfDocs.clear();
+          }
+        }
+      } else {
+        ++skippedLines;
+      }
+
+      if (lineNum > 200000) {
+        if (lineNum % 20000 == 0) {
+          long diffMs = System.currentTimeMillis() - startMs;
+          log.info("Processed " + lineNum + " lines in " + fileName + "; running for " + diffMs + " ms");
+        }
+      }
     }
 
     public void run() {
@@ -737,24 +822,32 @@ public class LogIndexer {
         log.warn("Skipping " + fileToParse.getAbsolutePath() + " because it doesn't exist anymore!");
         return;
       }
-      try {
-        doParseFile(fileToParse);
-      } catch (Exception exc) {
-        log.error("Failed to process file '" + fileName + "' due to: " + exc, exc);
+
+      lineNum = 0;
+      batchOfDocs.clear();
+      startMs = System.currentTimeMillis();
+
+      if (logIndexer.tail) {
+        tailer = new Tailer(fileToParse, this, logIndexer.tailerDelayMs);
+        log.info("Tailing "+fileToParse+" with delay "+logIndexer.tailerDelayMs+" ms");
+
+        logIndexer.tailerReaperBgThread.trackTailer(this);
+
+        tailer.run(); // we're already in a thread, so just delegate to run
+        log.info("Tailer stopped ... LogParser for " + fileName + " is done running.");
+        logIndexer.onFinishedParsingFile(fileName, lineNum, skippedLines, System.currentTimeMillis() - startMs);
+      } else {
+        try {
+          doParseFile(fileToParse);
+        } catch (Exception exc) {
+          log.error("Failed to process file '" + fileName + "' due to: " + exc, exc);
+        }
       }
     }
 
-    protected void doParseFile(File gzFile) throws Exception {
+    protected void doParseFile(File fileToParse) throws Exception {
       BufferedReader br = null;
       String line = null;
-      Map<String,Object> doc = null;
-      int skippedLines = 0;
-      String fileNameKey = fileName;
-      int lineNum = 0;
-      List batchOfDocs = new ArrayList(logIndexer.fusionBatchSize);
-
-      long startMs = System.currentTimeMillis();
-
       try {
         // gunzip if needed
         if (fileName.endsWith(".gz")) {
@@ -762,52 +855,19 @@ public class LogIndexer {
                   new InputStreamReader(
                           new GzipCompressorInputStream(
                                   new BufferedInputStream(
-                                          new FileInputStream(gzFile))), StandardCharsets.UTF_8));
+                                          new FileInputStream(fileToParse))), StandardCharsets.UTF_8));
         } else {
           br = new BufferedReader(
                   new InputStreamReader(
                           new BufferedInputStream(
-                                  new FileInputStream(gzFile)), StandardCharsets.UTF_8));
+                                  new FileInputStream(fileToParse)), StandardCharsets.UTF_8));
         }
 
         if (log.isDebugEnabled())
           log.debug("Reading lines in file: " + fileName);
 
-        while ((line = br.readLine()) != null) {
-          logIndexer.linesRead.incrementAndGet();
-
-          ++lineNum;
-
-          if (lineNum < skipOver) {
-            // support for skipping over lines
-            continue;
-          }
-
-          line = line.trim();
-          if (line.length() == 0)
-            continue;
-
-          doc = logIndexer.parseLogLine(logDir.getName(), fileNameKey, lineNum, line, dateParser);
-          if (doc != null) {
-            batchOfDocs.add(doc);
-            docCounter.incrementAndGet();
-
-            if (batchOfDocs.size() >= logIndexer.fusionBatchSize) {
-              logIndexer.fusion.postBatchToPipeline(batchOfDocs);
-              batchOfDocs.clear();
-            }
-
-          } else {
-            ++skippedLines;
-          }
-
-          if (lineNum > 200000) {
-            if (lineNum % 20000 == 0) {
-              long diffMs = System.currentTimeMillis() - startMs;
-              log.info("Processed " + lineNum + " lines in " + fileName + "; running for " + diffMs + " ms");
-            }
-          }
-        }
+        while ((line = br.readLine()) != null)
+          handle(line);
 
         if (!batchOfDocs.isEmpty()) {
           logIndexer.fusion.postBatchToPipeline(batchOfDocs);
@@ -815,17 +875,62 @@ public class LogIndexer {
         }
 
       } catch (IOException ioExc) {
-        log.error("Failed to process " + gzFile.getAbsolutePath() + " due to: " + ioExc);
+        log.error("Failed to process " + fileToParse.getAbsolutePath() + " due to: " + ioExc);
       } finally {
         if (br != null) {
           try {
             br.close();
-          } catch (Exception ignore) {
-          }
+          } catch (Exception ignore) {}
         }
       }
 
       logIndexer.onFinishedParsingFile(fileName, lineNum, skippedLines, System.currentTimeMillis() - startMs);
+    }
+  }
+
+  class TailerReaperThread extends Thread {
+
+    boolean stopped = false;
+    List<FileParser> fileParsers = new ArrayList<FileParser>();
+    long thresholdMs = 120*1000L; // if no events for 2-minutes
+
+    TailerReaperThread() {
+      super("TailerReaperThread");
+      setDaemon(true);
+    }
+
+    public void trackTailer(FileParser fp) {
+      synchronized (fileParsers) {
+        fileParsers.add(fp);
+      }
+    }
+
+    @Override
+    public void run() {
+      while (!stopped) {
+        try {
+          Thread.sleep(30000);
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+          stopped = true;
+        }
+
+        if (stopped)
+          break;
+
+        long nowMs = System.currentTimeMillis();
+        synchronized (fileParsers) {
+          Iterator<FileParser> iter = fileParsers.iterator();
+          while (iter.hasNext()) {
+            FileParser fp = iter.next();
+            if ((nowMs - fp.lastEventAtMs) > thresholdMs) {
+              log.warn("No new lines added to " + fp.fileName + " in more than " + thresholdMs + " ms ... stopping the tailer");
+              fp.tailer.stop();
+              iter.remove();
+            }
+          }
+        }
+      }
     }
   }
 }

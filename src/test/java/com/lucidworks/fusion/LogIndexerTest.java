@@ -11,6 +11,9 @@ import static org.junit.Assert.fail;
 import com.github.tomakehurst.wiremock.junit.WireMockRule;
 
 import java.io.File;
+import java.io.IOException;
+
+import org.apache.commons.io.FileUtils;
 
 public class LogIndexerTest {
 
@@ -82,5 +85,51 @@ public class LogIndexerTest {
     tmp = new File("test-data_processed_files_v2");
     if (tmp.isFile())
       tmp.delete();
+
+    /*
+
+    TODO: need a way to kill the watching log indexer
+
+    // test watch and tail support
+    final File watchDir = new File("target/watchdir");
+    if (watchDir.isDirectory())
+      watchDir.delete();
+    watchDir.mkdirs();
+    if (!watchDir.isDirectory())
+      fail("Failed to create test directory "+watchDir.getAbsolutePath());
+
+    final File fileToCopy = new File(testDataDir,"httpd_access.log");
+    Thread copyTestLogIntoWatchDirectoryThread = new Thread() {
+      public void run() {
+        try {
+          Thread.sleep(10000);
+        } catch (InterruptedException e) {
+          e.printStackTrace();
+        }
+        File destFile = new File(watchDir, "httpd_access.log");
+        try {
+          FileUtils.copyFile(fileToCopy, destFile);
+        } catch (IOException e) {
+          fail("Failed to copy file due to: "+e);
+        }
+      }
+    };
+    copyTestLogIntoWatchDirectoryThread.start();
+
+    args = new String[] {
+            "-fusionUser",fusionUser,
+            "-fusionPass",fusionPass,
+            "-fusionRealm",fusionRealm,
+            "-fusion",fusionEndpoints,
+            "-dir",watchDir.getAbsolutePath(),
+            "-watch", "-tail",
+            "-grokPatternFile","patterns/grok-patterns",
+            "-grokPattern","COMMONAPACHELOG",
+            "-tailerReaperThresholdMs", "10000"
+    };
+    cli = LogIndexer.processCommandLineArgs(args);
+    logIndexer = new LogIndexer();
+    logIndexer.run(cli);
+    */
   }
 }
