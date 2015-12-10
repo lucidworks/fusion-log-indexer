@@ -10,6 +10,7 @@ import org.apache.http.auth.UsernamePasswordCredentials;
 import org.apache.http.client.CookieStore;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.cookie.Cookie;
 import org.apache.http.entity.ContentProducer;
 import org.apache.http.entity.ContentType;
@@ -68,7 +69,7 @@ public class FusionPipelineClient {
   Random random;
   ObjectMapper jsonObjectMapper;
   String fusionUser = null;
-  String fusionPass = null;
+  byte[] fusionPass = null;
   String fusionRealm = null;
   AtomicInteger requestCounter = null;
   Map<String,Meter> metersByHost = new HashMap<>();
@@ -87,7 +88,7 @@ public class FusionPipelineClient {
     cookieStore = new BasicCookieStore();
 
     this.fusionUser = fusionUser;
-    this.fusionPass = fusionPass;
+    this.fusionPass = fusionPass.getBytes(StandardCharsets.UTF_8);
     this.fusionRealm = fusionRealm;
 
     // build the HttpClient to be used for all requests
@@ -95,6 +96,7 @@ public class FusionPipelineClient {
     httpClientBuilder.setDefaultRequestConfig(globalConfig).setDefaultCookieStore(cookieStore);
     httpClientBuilder.setMaxConnPerRoute(100);
     httpClientBuilder.setMaxConnTotal(500);
+    httpClientBuilder.setSSLHostnameVerifier(new NoopHostnameVerifier());
 
     if (fusionUser != null && fusionRealm == null)
       httpClientBuilder.addInterceptorFirst(new PreEmptiveBasicAuthenticator(fusionUser, fusionPass));
@@ -103,7 +105,7 @@ public class FusionPipelineClient {
 
     originalEndpoints = Arrays.asList(endpointUrl.split(","));
     try {
-      sessions = establishSessions(originalEndpoints, fusionUser, fusionPass, fusionRealm);
+      sessions = establishSessions(originalEndpoints);
     } catch (Exception exc) {
       if (exc instanceof RuntimeException) {
         throw (RuntimeException)exc;
@@ -132,13 +134,13 @@ public class FusionPipelineClient {
     return meter;
   }
 
-  protected Map<String,FusionSession> establishSessions(List<String> endpoints, String user, String password, String realm) throws Exception {
+  protected Map<String,FusionSession> establishSessions(List<String> endpoints) throws Exception {
 
     Exception lastError = null;
     Map<String,FusionSession> map = new HashMap<String, FusionSession>();
     for (String url : endpoints) {
       try {
-        map.put(url, establishSession(url, user, password, realm));
+        map.put(url, establishSession(url));
       } catch (Exception exc) {
         // just log this ... so long as there is at least one good endpoint we can use it
         lastError = exc;
@@ -155,20 +157,20 @@ public class FusionPipelineClient {
     }
 
     log.info("Established sessions with "+map.size()+" of "+endpoints.size()+
-      " Fusion endpoints for user "+user+" in realm "+realm);
+      " Fusion endpoints for user "+fusionUser+" in realm "+fusionRealm);
 
     return map;
   }
 
-  protected FusionSession establishSession(String url, String user, String password, String realm) throws Exception {
+  protected FusionSession establishSession(String url) throws Exception {
 
     FusionSession fusionSession = new FusionSession();
 
-    if (realm != null) {
+    if (fusionRealm != null) {
       int at = url.indexOf("/api");
       String proxyUrl = url.substring(0, at);
-      String sessionApi = proxyUrl + "/api/session?realmName=" + realm;
-      String jsonString = "{\"username\":\"" + user + "\", \"password\":\"" + password + "\"}"; // TODO: ugly!
+      String sessionApi = proxyUrl + "/api/session?realmName=" + fusionRealm;
+      String jsonString = "{\"username\":\"" + fusionUser + "\", \"password\":\"" + new String(fusionPass, StandardCharsets.UTF_8) + "\"}"; // TODO: ugly!
 
       URL sessionApiUrl = new URL(sessionApi);
       String sessionHost = sessionApiUrl.getHost();
@@ -222,7 +224,7 @@ public class FusionPipelineClient {
         if (entity != null)
           EntityUtils.consume(entity);
       }
-      log.info("Established secure session with Fusion Session API on " + url + " for user " + user + " in realm " + realm);
+      log.info("Established secure session with Fusion Session API on " + url + " for user " + fusionUser + " in fusionRealm " + fusionRealm);
     }
 
     fusionSession.sessionEstablishedAt = System.nanoTime();
@@ -266,7 +268,7 @@ public class FusionPipelineClient {
     // reset the "context" object for the HttpContext for this endpoint
     FusionSession fusionSession = null;
     try {
-      fusionSession = establishSession(endpoint, fusionUser, fusionPass, fusionRealm);
+      fusionSession = establishSession(endpoint);
       sessions.put(endpoint, fusionSession);
     } catch (Exception exc) {
       log.error("Failed to re-establish session with Fusion at " + endpoint + " due to: " + exc);
@@ -306,7 +308,7 @@ public class FusionPipelineClient {
           Thread.interrupted();
         }
 
-        sessions = establishSessions(originalEndpoints, fusionUser, fusionPass, fusionRealm);
+        sessions = establishSessions(originalEndpoints);
         mutable = new ArrayList<String>(sessions.keySet());
       }
       if (mutable.isEmpty())

@@ -4,7 +4,6 @@ import com.codahale.metrics.ConsoleReporter;
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
-import oi.thekraken.grok.api.Match;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.GnuParser;
 import org.apache.commons.cli.HelpFormatter;
@@ -17,19 +16,7 @@ import org.apache.commons.io.input.TailerListenerAdapter;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileFilter;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.io.PrintStream;
-import java.lang.reflect.Method;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Path;
@@ -45,9 +32,7 @@ import java.util.regex.Pattern;
 
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import oi.thekraken.grok.api.Grok;
-import parsers.CustomLogLineParser;
+import parsers.LogLineParser;
 
 /**
  * Command-line utility for sending log messages to a Fusion pipeline.
@@ -68,7 +53,7 @@ public class LogIndexer {
                     .withArgName("PATH")
                     .hasArg()
                     .isRequired(true)
-                    .withDescription("Path to a directory containing logs")
+                    .withDescription("Path to a directory containing logs; uncompressed or gzip compressed files (*.gz) are supported")
                     .create("dir"),
             OptionBuilder
                     .withArgName("PATTERN")
@@ -77,8 +62,20 @@ public class LogIndexer {
                     .withDescription("Regex to match log files in the watched directory, default is *.log")
                     .create("match"),
             OptionBuilder
+                    .withArgName("CHARSET")
+                    .hasArg()
                     .isRequired(false)
-                    .withDescription("Tail matched files for new log entries")
+                    .withDescription("Name of the character set for the log file; defaults to UTF-8")
+                    .create("charset"),
+            OptionBuilder
+                    .withArgName("DELIM")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Line delimiter to use when scanning for lines; defaults to the line.separator system property")
+                    .create("lineDelimiter"),
+            OptionBuilder
+                    .isRequired(false)
+                    .withDescription("Tail matched files for new log entries; note that you cannot tail compressed log files")
                     .create("tail"),
             OptionBuilder
                     .withArgName("MS")
@@ -145,6 +142,12 @@ public class LogIndexer {
                     .withDescription("Fusion password; required if fusionAuthEnbled=true")
                     .create("fusionPass"),
             OptionBuilder
+                    .withArgName("PATH")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("File containing the Fusion password, it will be deleted after the password is read; this allows you to avoid passing the password on the command-line.")
+                    .create("fusionPassFile"),
+            OptionBuilder
                     .withArgName("REALM")
                     .hasArg()
                     .isRequired(false)
@@ -163,24 +166,6 @@ public class LogIndexer {
                     .withDescription("Fusion indexing batch size; default is 100")
                     .create("fusionBatchSize"),
             OptionBuilder
-                    .withArgName("PATTERN")
-                    .hasArg()
-                    .isRequired(false)
-                    .withDescription("Grok pattern to parse log lines with")
-                    .create("grokPattern"),
-            OptionBuilder
-                    .withArgName("NAME | PATH")
-                    .hasArg()
-                    .isRequired(false)
-                    .withDescription("Name of built-in grok pattern file or path to custom Grok pattern file; built-in should start with patterns/")
-                    .create("grokPatternFile"),
-            OptionBuilder
-                    .withArgName("INT")
-                    .hasArg()
-                    .isRequired(false)
-                    .withDescription("Avoid parsing a log line if its length is less than this value")
-                    .create("minLineLength"),
-            OptionBuilder
                     .withArgName("FIELD")
                     .hasArg()
                     .isRequired(false)
@@ -190,8 +175,14 @@ public class LogIndexer {
                     .withArgName("CLASS")
                     .hasArg()
                     .isRequired(false)
-                    .withDescription("Class name of a custom line parser, used when grok doesn't do the job; must implement the CustomLogLineParser interface")
+                    .withDescription("Class name of a line parser, defaults to GrokLogLineParser; must implement the LogLineParser interface")
                     .create("lineParserClass"),
+            OptionBuilder
+                    .withArgName("PATH")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Path to a properties file for configuring the log line parser.")
+                    .create("lineParserConfig"),
             OptionBuilder
                     .withArgName("INT")
                     .hasArg()
@@ -202,13 +193,13 @@ public class LogIndexer {
                     .withArgName("INT")
                     .hasArg()
                     .isRequired(false)
-                    .withDescription("Number of sender threads, i.e. those consuming docs from the queue; defaults to the number of Fusion service endpoints")
+                    .withDescription("Number of sender threads, i.e. those consuming docs from the queue; defaults to twice the number of Fusion service endpoints")
                     .create("senderThreads"),
             OptionBuilder
                     .withArgName("INT")
                     .hasArg()
                     .isRequired(false)
-                    .withDescription("Milliseconds to wait to see a document on the queue; defaults to 10 ms (should be a small number)")
+                    .withDescription("Milliseconds to wait to see a document on the queue; defaults to 200 ms")
                     .create("pollQueueTimeMs")
     };
   }
@@ -216,9 +207,8 @@ public class LogIndexer {
   public static CommandLine processCommandLineArgs(String[] args) {
     Options opts = getOptions();
     if (args == null || args.length == 0 || args[0] == null || args[0].trim().length() == 0) {
-      System.err.println("Invalid command-line args!");
       HelpFormatter formatter = new HelpFormatter();
-      formatter.printHelp(LogIndexer.class.getName(), opts);
+      formatter.printHelp(125, LogIndexer.class.getName(), null, opts, null);
       System.exit(1);
     }
     return processCommandLineArgs(opts, args);
@@ -231,7 +221,6 @@ public class LogIndexer {
 
   protected FusionPipelineClient fusion;
   protected int fusionBatchSize;
-  protected ObjectMapper jsonMapper = new ObjectMapper();
 
   public MetricRegistry metrics = new MetricRegistry();
   public Meter linesProcessed = metrics.meter("linesProcessed");
@@ -248,14 +237,14 @@ public class LogIndexer {
   protected Date ignoreBeforeDate;
   protected boolean watch = false;
   protected boolean deleteAfterIndexing = true;
-  protected Grok grok = null;
-  protected Integer minLineLength = null;
   protected String idFieldName;
   protected boolean tail = false;
   protected long tailerDelayMs = 500;
   protected TailerReaperThread tailerReaperBgThread = null;
-  protected CustomLogLineParser customLogLineParser = null;
+  protected LogLineParser logLineParser = null;
   private ConsoleReporter reporter = null;
+  protected String charsetName = null;
+  protected String lineDelimiter = null;
 
   protected BlockingQueue<Map> docsToIndexQueue;
 
@@ -283,11 +272,6 @@ public class LogIndexer {
       }
     });
 
-    String minLineLengthArg = cli.getOptionValue("minLineLength");
-    if (minLineLengthArg != null) {
-      minLineLength = new Integer(minLineLengthArg);
-    }
-
     watch = cli.hasOption("watch");
     if (!watch) {
       if (matchedLogFiles.length == 0) {
@@ -305,71 +289,20 @@ public class LogIndexer {
       log.info("Started the tailer reaper background thread ("+tailerReaperBgThread+") with threshold: "+tailerReaperBgThread.thresholdMs);
     }
 
-    // setup grok
-    String grokPatternFile = cli.getOptionValue("grokPatternFile");
-    if (grokPatternFile != null) {
-      if (grokPatternFile.startsWith("patterns/")) {
-        // load built-in from classpath
-        grok = new Grok();
-        InputStreamReader isr = null;
-        try {
-          InputStream in = getClass().getClassLoader().getResourceAsStream(grokPatternFile);
-          if (in == null)
-            throw new FileNotFoundException(grokPatternFile+" not found on classpath!");
-          isr = new InputStreamReader(in, StandardCharsets.UTF_8);
-          grok.addPatternFromReader(isr);
-        } finally {
-          if (isr != null) {
-            try {
-              isr.close();
-            } catch (Exception ignore){}
-          }
-        }
-      } else {
-        grok = Grok.create(grokPatternFile);
-      }
-
-      String grokPattern = cli.getOptionValue("grokPattern");
-      if (grokPattern == null || grokPattern.isEmpty())
-        throw new IllegalArgumentException("Must specify a grokPattern!");
-
-      if (!grokPattern.startsWith("%{"))
-        grokPattern = "%{"+grokPattern+"}";
-
-      grok.compile(grokPattern);
-
-      log.info("Initialized grok parser for pattern: "+grokPattern);
-    }
-
     // users can register a custom line parser if grok doesn't meet their needs
-    String lineParserClassArg = cli.getOptionValue("lineParserClass");
-    if (lineParserClassArg != null) {
-      Class lineParserClass = getClass().getClassLoader().loadClass(lineParserClassArg);
-      customLogLineParser = (CustomLogLineParser)lineParserClass.newInstance();
-      Method initMethod = null;
-      try {
-        initMethod = lineParserClass.getMethod("init", CommandLine.class);
-      } catch (NoSuchMethodError noSuchMethodError) {
-        // this is ok ... they don't have implement init if it's not needed
-      } catch (NoSuchMethodException nse) {
-        // ditto
-      }
-      if (initMethod != null) {
-        initMethod.invoke(customLogLineParser, cli);
-      }
-      log.info("Initialized custom log line parser: "+customLogLineParser);
-    }
+    logLineParser = initLogLineParser(cli);
 
     if (cli.hasOption("ignoreBefore")) {
       ignoreBeforeDate = ISO_8601_DATE_FMT.parse(cli.getOptionValue("ignoreBefore"));
       log.info("Will ignore any log messages that occurred before: " + ignoreBeforeDate);
     }
 
+    charsetName = cli.getOptionValue("charset",StandardCharsets.UTF_8.name());
+    lineDelimiter = cli.getOptionValue("lineDelimiter", System.getProperty("line.separator"));
+
     deleteAfterIndexing = Boolean.parseBoolean(cli.getOptionValue("deleteAfterIndexing", "false"));
 
     fileReaderPoolSize = Integer.parseInt(cli.getOptionValue("fileReaderPoolSize", "10"));
-    
-    jsonMapper = new ObjectMapper();
 
     if (reporter == null) {
       reporter = ConsoleReporter.forRegistry(metrics)
@@ -386,13 +319,31 @@ public class LogIndexer {
     int restartAtLine = 0;
 
     final String fusionEndpoints = cli.getOptionValue("fusion");
-
     final boolean fusionAuthEnabled = "true".equalsIgnoreCase(cli.getOptionValue("fusionAuthEnabled", "true"));
     final String fusionUser = cli.getOptionValue("fusionUser", "admin");
+    String fusionPass = cli.getOptionValue("fusionPass");
+    if (fusionAuthEnabled && (fusionPass == null || fusionPass.isEmpty())) {
+      String fusionPassFileArg = cli.getOptionValue("fusionPassFile");
+      if (fusionPassFileArg != null) {
+        File fusionPassFile = new File(fusionPassFileArg);
+        BufferedReader isr = null;
+        try {
+          isr = new BufferedReader(new InputStreamReader(new FileInputStream(fusionPassFile), StandardCharsets.UTF_8));
+          fusionPass = isr.readLine().trim();
+        } finally {
+          if (isr != null) {
+            try {
+              isr.close();
+            } catch (Exception ignore){}
+          }
+          fusionPassFile.delete();
+        }
+      }
 
-    final String fusionPass = cli.getOptionValue("fusionPass");
-    if (fusionAuthEnabled && (fusionPass == null || fusionPass.isEmpty()))
-      throw new IllegalArgumentException("Fusion password is required when authentication is enabled!");
+      if (fusionPass == null || fusionPass.isEmpty()) {
+        throw new IllegalArgumentException("Fusion password is required when authentication is enabled!");
+      }
+    }
 
     final String fusionRealm = cli.getOptionValue("fusionRealm", "native");
     fusionBatchSize = Integer.parseInt(cli.getOptionValue("fusionBatchSize", "100"));
@@ -406,8 +357,9 @@ public class LogIndexer {
             new LinkedBlockingQueue<Map>(Integer.parseInt(cli.getOptionValue("docsToIndexQueueSize", "1000000")));
 
     String senderThreads = cli.getOptionValue("senderThreads");
-    int numSenderThreads = (senderThreads != null) ? Integer.parseInt(senderThreads) : fusionEndpoints.split(",").length;
-    int pollQueueTimeMs = Integer.parseInt(cli.getOptionValue("pollQueueTimeMs","10"));
+    int numFusionEndpoints = fusionEndpoints.split(",").length;
+    int numSenderThreads = (senderThreads != null) ? Integer.parseInt(senderThreads) : 2*numFusionEndpoints;
+    int pollQueueTimeMs = Integer.parseInt(cli.getOptionValue("pollQueueTimeMs","200"));
 
     try {
       fusion = fusionAuthEnabled ?
@@ -422,7 +374,7 @@ public class LogIndexer {
       ExecutorService senderThreadPool = Executors.newFixedThreadPool(numSenderThreads);
       for (int s=0; s < senders.length; s++)
         senderThreadPool.submit(senders[s]);
-      log.info("Created "+numSenderThreads+" sender threads ...");
+      log.info("Created "+numSenderThreads+" sender threads (queue consumers) to send docs to "+numFusionEndpoints+" Fusion endpoints.");
 
       processLogDir(fusion, logDir, matchedLogFiles, matchLogsPattern, alreadyProcessedFiles, restartAtLine);
 
@@ -435,10 +387,10 @@ public class LogIndexer {
         shutdownAndAwaitTermination(senderThreadPool);
 
         if (!docsToIndexQueue.isEmpty()) {
-          log.info("There are still "+docsToIndexQueue.size()+" docs to be sent after all senders have been shutdown ... spinning up a final Sender to handle the remaining docs.");
+          log.info("There are still "+docsToIndexQueue.size()+
+                  " docs to be sent after all senders have been shutdown ... spinning up a final Sender to handle the remaining docs.");
           // still some docs to be indexed ...
-          Sender finalSender = new Sender(docsToIndexQueue, pollQueueTimeMs, fusion, fusionBatchSize, linesProcessed);
-          finalSender.run();
+          (new Sender(docsToIndexQueue, pollQueueTimeMs, fusion, fusionBatchSize, linesProcessed)).run();
         }
       }
 
@@ -456,6 +408,47 @@ public class LogIndexer {
         }
       }
     }
+  }
+  
+  protected LogLineParser initLogLineParser(CommandLine cli) throws Exception {
+    Class lineParserClass =
+            getClass().getClassLoader().loadClass(cli.getOptionValue("lineParserClass","parsers.GrokLogLineParser"));
+    LogLineParser parser = (LogLineParser)lineParserClass.newInstance();
+    String parserConfigFile = cli.getOptionValue("lineParserConfig");
+    Properties configProps = new Properties();
+    InputStream propsIn = null;
+    if (parserConfigFile != null) {
+      propsIn = new FileInputStream(parserConfigFile);
+    } else {
+      // load default config from the classpath
+      propsIn = getClass().getClassLoader().getResourceAsStream("grok-parser.properties");
+      if (propsIn == null)
+        throw new FileNotFoundException("grok-parser.properties not found on the classpath!");
+    }
+
+    InputStreamReader isr = null;
+    try {
+      isr = new InputStreamReader(propsIn, StandardCharsets.UTF_8);
+      configProps.load(isr);
+    } finally {
+      if (isr != null) {
+        try {
+          isr.close();
+        } catch (Exception ignore){}
+      }
+    }
+    String[] otherArgs = cli.getArgs();
+    if (otherArgs != null) {
+      for (String arg : otherArgs) {
+        int eqAt = arg.indexOf("=");
+        if (eqAt == -1)
+          continue;
+        configProps.put(arg.substring(0,eqAt).trim(), arg.substring(eqAt + 1).trim());
+      }
+    }
+    parser.init(configProps);
+    log.info("Initialized custom log line parser: "+parser);  
+    return parser;
   }
 
   protected List<File> getFilesToParse(File[] matchedLogFiles, final Pattern matchLogFilePattern) throws Exception {
@@ -624,38 +617,8 @@ public class LogIndexer {
   }
 
   protected Map<String,Object> parseLogLine(String fileName, int lineNum, String line) throws Exception {
-    if (minLineLength != null && line.length() < minLineLength) {
-      log.error("Ignoring line " + lineNum + " in " + fileName + " due to: line is too short; " + line);
-      return null;
-    }
-
-    if (customLogLineParser != null) {
-      Map<String,Object> customMap = customLogLineParser.parseLine(fileName, lineNum, line, grok);
-      if (customMap != null) {
-        return buildPipelineDocFromMap(customMap, fileName, lineNum);
-      }
-    } else if (grok != null) {
-      Match gm = grok.match(line);
-      gm.captures();
-      if (!gm.isNull()) {
-        return buildPipelineDocFromMap(gm.toMap(), fileName, lineNum);
-      }
-    } else {
-      if (line.startsWith("{") && line.endsWith("}")) {
-        // treat as JSON ... parse into a JSON map and the build a pipeline document structure (also a map)
-        Map jsonMap = jsonMapper.readValue(line, Map.class);
-        return buildPipelineDocFromMap(jsonMap, fileName, lineNum);
-      } else {
-        Map<String,Object> doc = new HashMap<String,Object>(3);
-        doc.put("id", String.format("%s:%d", fileName, lineNum));
-        List fields = new ArrayList(1);
-        fields.add(mapField("_raw_content_", line));
-        doc.put("fields", fields);
-        return doc;
-      }
-    }
-
-    return null;
+    Map<String,Object> parsed = logLineParser.parseLine(fileName, lineNum, line);
+    return (parsed != null) ? buildPipelineDocFromMap(parsed, fileName, lineNum) : null;
   }
 
   protected Map<String,Object> buildPipelineDocFromMap(Map grokMap, String fileName, int lineNum) {
@@ -674,9 +637,8 @@ public class LogIndexer {
     List fields = new ArrayList(grokMap.size());
     for (Object key : grokMap.keySet()) {
       Object val = grokMap.get(key);
-      if (val != null) {
+      if (val != null)
         fields.add(mapField(key.toString(), val));
-      }
     }
     if (hasIdField) {
       fields.add(mapField("_src_", String.format("%s:%d", fileName, lineNum)));
@@ -686,15 +648,10 @@ public class LogIndexer {
   }
 
   protected final Map<String,Object> mapField(final String fieldName, final Object val) {
-    Map<String,Object> fieldMap = new HashMap<String, Object>(10);
+    Map<String,Object> fieldMap = new HashMap<String, Object>(4);
     fieldMap.put("name", fieldName.toLowerCase());
     fieldMap.put("value", val);
     return fieldMap;
-  }
-
-  static void displayOptions(PrintStream out) throws Exception {
-    HelpFormatter formatter = new HelpFormatter();
-    formatter.printHelp(LogIndexer.class.getName(), getOptions());
   }
 
   static Options getOptions() {
@@ -725,13 +682,13 @@ public class LogIndexer {
         System.err.println("Failed to parse command-line arguments due to: " + exp.getMessage());
       }
       HelpFormatter formatter = new HelpFormatter();
-      formatter.printHelp(LogIndexer.class.getName(), options);
+      formatter.printHelp(125, LogIndexer.class.getName(), null, options, null);
       System.exit(1);
     }
 
     if (cli.hasOption("help")) {
       HelpFormatter formatter = new HelpFormatter();
-      formatter.printHelp(LogIndexer.class.getName(), options);
+      formatter.printHelp(125, LogIndexer.class.getName(), null, options, null);
       System.exit(0);
     }
 
@@ -843,16 +800,16 @@ public class LogIndexer {
   // Runs in a thread pool to parse files in-parallel
   class FileParser extends TailerListenerAdapter implements Runnable {
 
-    private File fileToParse;
-    private String fileName;
-    private int skipOver;
-    private LogIndexer logIndexer;
-    private List batchOfDocs;
-    private int lineNum = 0;
-    private int skippedLines = 0;
-    private long startMs;
-    private long lastEventAtMs = 0l;
-    private Tailer tailer = null;
+    File fileToParse;
+    String fileName;
+    int skipOver;
+    LogIndexer logIndexer;
+    List batchOfDocs;
+    int lineNum = 0;
+    int skippedLines = 0;
+    long startMs;
+    long lastEventAtMs = 0l;
+    Tailer tailer = null;
 
     FileParser(LogIndexer logIndexer, File fileToParse, int skipOver) {
       this.logIndexer = logIndexer;
@@ -866,6 +823,7 @@ public class LogIndexer {
 
     public void handle(String line) {
       if (tailer != null) {
+        // tailer reaper thread uses last activity time to determine if it should stop the tailer on this file
         lastEventAtMs = System.currentTimeMillis();
       }
 
@@ -935,41 +893,29 @@ public class LogIndexer {
     }
 
     protected void doParseFile(File fileToParse) throws Exception {
-      BufferedReader br = null;
-      String line = null;
+      Scanner scanner = null;
       try {
-        // gunzip if needed
-        if (fileName.endsWith(".gz")) {
-          br = new BufferedReader(
-                  new InputStreamReader(
-                          new GzipCompressorInputStream(
-                                  new BufferedInputStream(
-                                          new FileInputStream(fileToParse))), StandardCharsets.UTF_8));
-        } else {
-          br = new BufferedReader(
-                  new InputStreamReader(
-                          new BufferedInputStream(
-                                  new FileInputStream(fileToParse)), StandardCharsets.UTF_8));
+        InputStream inputStream = new BufferedInputStream(new FileInputStream(fileToParse));
+        if (fileName.endsWith(".gz"))
+          inputStream = new GzipCompressorInputStream(inputStream);
+        scanner = new Scanner(inputStream, logIndexer.charsetName);
+
+        if (logIndexer.lineDelimiter != null) {
+          scanner.useDelimiter(logIndexer.lineDelimiter);
         }
 
         if (log.isDebugEnabled())
           log.debug("Reading lines in file: " + fileName);
 
-        while ((line = br.readLine()) != null)
-          handle(line);
-
-        if (!batchOfDocs.isEmpty()) {
-          logIndexer.fusion.postBatchToPipeline(batchOfDocs);
-          linesProcessed.mark(batchOfDocs.size());
-          batchOfDocs.clear();
-        }
+        while (scanner.hasNext())
+          handle(scanner.next());
 
       } catch (IOException ioExc) {
         log.error("Failed to process " + fileToParse.getAbsolutePath() + " due to: " + ioExc);
       } finally {
-        if (br != null) {
+        if (scanner != null) {
           try {
-            br.close();
+            scanner.close();
           } catch (Exception ignore) {}
         }
       }
@@ -1054,16 +1000,9 @@ public class LogIndexer {
         Map doc = null;
         try {
           doc = queue.poll(pollQueueTimeMs, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-          // meh
-        }
-
-        if (doc == null) {
-          try {
-            Thread.sleep(100);
-          } catch (InterruptedException e) {}
+        } catch (InterruptedException ignore) {}
+        if (doc == null)
           continue;
-        }
 
         // got a doc ... add it to the batch
         batchOfDocs.add(doc);

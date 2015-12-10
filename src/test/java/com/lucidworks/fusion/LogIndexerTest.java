@@ -11,6 +11,7 @@ import com.github.tomakehurst.wiremock.junit.WireMockRule;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -61,16 +62,17 @@ public class LogIndexerTest {
       tmp.delete();
   }
 
-  @Ignore
+  //@Ignore
   @Test
   public void testDnsLog() throws Exception {
+
     /*
     SimpleDateFormat syslogtimestamp = new SimpleDateFormat("MMM dd HH:mm:ss");
     SimpleDateFormat ts_w_dayOfWeek = new SimpleDateFormat("EEE");
     Random random = new Random(5150);
     OutputStreamWriter osw = null;
     try {
-      osw = new OutputStreamWriter(new FileOutputStream(new File(testDataDir,"dns.log")), StandardCharsets.UTF_8);
+      osw = new OutputStreamWriter(new FileOutputStream(new File(testDataDir,"dns_log")), StandardCharsets.UTF_8);
       StringBuilder sb = new StringBuilder();
 
       for (int i=0; i < 30000; i++) {
@@ -129,9 +131,7 @@ public class LogIndexerTest {
             "-fusion",fusionEndpoints,
             "-dir",testDataDir.getAbsolutePath(),
             "-match", "^dns_log$",
-            "-lineParserClass", DnsLogLineParser.class.getName(),
-            "-grokPatternFile","patterns/grok-patterns",
-            "-grokPattern","%{SYSLOGTIMESTAMP} %{HOSTNAME} MSWinEventLog 1 Application %{NUMBER} %{DAY} %{SYSLOGTIMESTAMP:logdate} %{YEAR} 3 Lucent DNS Service N/A N/A Information %{HOSTNAME:host} None  client %{IP:client}#%{NUMBER}: query: (?<query>\\b((xn--)?[a-z0-9\\w]+(-[a-z0-9]+)*\\.)+[a-z]{2,}\\b) IN %{WORD:type}"
+            "-lineParserClass", DnsLogLineParser.class.getName()
     };
     CommandLine cli = LogIndexer.processCommandLineArgs(args);
     LogIndexer logIndexer = new LogIndexer();
@@ -147,9 +147,7 @@ public class LogIndexerTest {
             "-fusionPass",fusionPass,
             "-fusionRealm",fusionRealm,
             "-fusion",fusionEndpoints,
-            "-dir",testDataDir.getAbsolutePath(),
-            "-grokPatternFile","patterns/grok-patterns",
-            "-grokPattern","COMMONAPACHELOG"
+            "-dir",testDataDir.getAbsolutePath()
     };
     CommandLine cli = LogIndexer.processCommandLineArgs(args);
     LogIndexer logIndexer = new LogIndexer();
@@ -172,8 +170,6 @@ public class LogIndexerTest {
             "-fusionRealm",fusionRealm,
             "-fusion",fusionEndpoints,
             "-dir",testDataDir.getAbsolutePath(),
-            "-grokPatternFile","patterns/grok-patterns",
-            "-grokPattern","COMMONAPACHELOG",
             "-match","*.gz"
     };
     cli = LogIndexer.processCommandLineArgs(args);
@@ -190,8 +186,7 @@ public class LogIndexerTest {
       tmp.delete();
 
     /*
-
-    TODO: need a way to kill the watching log indexer
+    // TODO: need a way to kill the watching log indexer
 
     // test watch and tail support
     final File watchDir = new File("target/watchdir");
@@ -226,8 +221,6 @@ public class LogIndexerTest {
             "-fusion",fusionEndpoints,
             "-dir",watchDir.getAbsolutePath(),
             "-watch", "-tail",
-            "-grokPatternFile","patterns/grok-patterns",
-            "-grokPattern","COMMONAPACHELOG",
             "-tailerReaperThresholdMs", "10000"
     };
     cli = LogIndexer.processCommandLineArgs(args);
