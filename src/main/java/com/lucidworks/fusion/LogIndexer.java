@@ -40,9 +40,7 @@ import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 import java.util.regex.Pattern;
 
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
@@ -105,7 +103,7 @@ public class LogIndexer {
                     .hasArg()
                     .isRequired(false)
                     .withDescription("Size of the thread pool to process files in the directory; default is 10")
-                    .create("poolSize"),
+                    .create("fileReaderPoolSize"),
             OptionBuilder
                     .withArgName("DATE")
                     .hasArg()
@@ -193,8 +191,25 @@ public class LogIndexer {
                     .hasArg()
                     .isRequired(false)
                     .withDescription("Class name of a custom line parser, used when grok doesn't do the job; must implement the CustomLogLineParser interface")
-                    .create("lineParserClass")
-
+                    .create("lineParserClass"),
+            OptionBuilder
+                    .withArgName("INT")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Size of the queue holding pending docs to be sent to Fusion for indexing; default is 1000000")
+                    .create("docsToIndexQueueSize"),
+            OptionBuilder
+                    .withArgName("INT")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Number of sender threads, i.e. those consuming docs from the queue; defaults to the number of Fusion service endpoints")
+                    .create("senderThreads"),
+            OptionBuilder
+                    .withArgName("INT")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Milliseconds to wait to see a document on the queue; defaults to 10 ms (should be a small number)")
+                    .create("pollQueueTimeMs")
     };
   }
 
@@ -227,7 +242,7 @@ public class LogIndexer {
   public Counter totalSkippedLines = metrics.counter("totalSkippedLines");
 
   protected long _startedAtMs = 0L;
-  protected int poolSize = 10;
+  protected int fileReaderPoolSize = 10;
   protected File logDir;
   protected FileWriter processedFileSetWriter;
   protected Date ignoreBeforeDate;
@@ -241,6 +256,8 @@ public class LogIndexer {
   protected TailerReaperThread tailerReaperBgThread = null;
   protected CustomLogLineParser customLogLineParser = null;
   private ConsoleReporter reporter = null;
+
+  protected BlockingQueue<Map> docsToIndexQueue;
 
   public void run(CommandLine cli) throws Exception {
 
@@ -350,7 +367,8 @@ public class LogIndexer {
 
     deleteAfterIndexing = Boolean.parseBoolean(cli.getOptionValue("deleteAfterIndexing", "false"));
 
-    poolSize = Integer.parseInt(cli.getOptionValue("poolSize", "10"));
+    fileReaderPoolSize = Integer.parseInt(cli.getOptionValue("fileReaderPoolSize", "10"));
+    
     jsonMapper = new ObjectMapper();
 
     if (reporter == null) {
@@ -383,13 +401,47 @@ public class LogIndexer {
 
     FusionPipelineClient.metrics = metrics;
 
+    // setup the queue for holding docs to index
+    docsToIndexQueue =
+            new LinkedBlockingQueue<Map>(Integer.parseInt(cli.getOptionValue("docsToIndexQueueSize", "1000000")));
+
+    String senderThreads = cli.getOptionValue("senderThreads");
+    int numSenderThreads = (senderThreads != null) ? Integer.parseInt(senderThreads) : fusionEndpoints.split(",").length;
+    int pollQueueTimeMs = Integer.parseInt(cli.getOptionValue("pollQueueTimeMs","10"));
+
     try {
       fusion = fusionAuthEnabled ?
               new FusionPipelineClient(fusionEndpoints, fusionUser, fusionPass, fusionRealm) :
               new FusionPipelineClient(fusionEndpoints);
-
       log.info("Connected to Fusion. Processing log files in " + logDir.getAbsolutePath());
+
+      // setup a pool of sender threads ...
+      Sender[] senders = new Sender[numSenderThreads];
+      for (int s=0; s < senders.length; s++)
+        senders[s] = new Sender(docsToIndexQueue, pollQueueTimeMs, fusion, fusionBatchSize, linesProcessed);
+      ExecutorService senderThreadPool = Executors.newFixedThreadPool(numSenderThreads);
+      for (int s=0; s < senders.length; s++)
+        senderThreadPool.submit(senders[s]);
+      log.info("Created "+numSenderThreads+" sender threads ...");
+
       processLogDir(fusion, logDir, matchedLogFiles, matchLogsPattern, alreadyProcessedFiles, restartAtLine);
+
+      if (!watch) {
+
+        for (int s=0; s < senders.length; s++)
+          senders[s].stopRunning();
+
+        log.info("No more log events being queued ... waiting until all "+numSenderThreads+" sender threads complete their work.");
+        shutdownAndAwaitTermination(senderThreadPool);
+
+        if (!docsToIndexQueue.isEmpty()) {
+          log.info("There are still "+docsToIndexQueue.size()+" docs to be sent after all senders have been shutdown ... spinning up a final Sender to handle the remaining docs.");
+          // still some docs to be indexed ...
+          Sender finalSender = new Sender(docsToIndexQueue, pollQueueTimeMs, fusion, fusionBatchSize, linesProcessed);
+          finalSender.run();
+        }
+      }
+
     } finally {
       if (fusion != null) {
         fusion.shutdown();
@@ -475,7 +527,7 @@ public class LogIndexer {
 
     processedFileSetWriter = new FileWriter(logDir.getName() + "_processed_files_v2", true);
 
-    ExecutorService pool = Executors.newFixedThreadPool(poolSize);
+    ExecutorService pool = Executors.newFixedThreadPool(fileReaderPoolSize);
     this._startedAtMs = System.currentTimeMillis();
     for (File file : sortedLogFiles) {
       String fileName = file.getAbsolutePath();
@@ -839,23 +891,9 @@ public class LogIndexer {
       }
 
       if (doc != null) {
-        batchOfDocs.add(doc);
+        // queue this doc to be consumed by a Fusion sender thread
+        docsToIndexQueue.offer(doc);
         docCounter.inc();
-
-        if (batchOfDocs.size() >= logIndexer.fusionBatchSize) {
-          try {
-            logIndexer.fusion.postBatchToPipeline(batchOfDocs);
-            linesProcessed.mark(batchOfDocs.size());
-          } catch (Exception exc) {
-            if (exc instanceof RuntimeException) {
-              throw (RuntimeException)exc;
-            } else {
-              throw new RuntimeException(exc);
-            }
-          } finally {
-            batchOfDocs.clear();
-          }
-        }
       } else {
         ++skippedLines;
       }
@@ -983,6 +1021,87 @@ public class LogIndexer {
           }
         }
       }
+    }
+  }
+
+  class Sender implements Runnable {
+
+    BlockingQueue<Map> queue;
+    int pollQueueTimeMs;
+    List<Map> batchOfDocs;
+    int batchSize;
+    FusionPipelineClient fusion;
+    Meter linesProcessed;
+    long docsSentByMe = 0;
+    volatile boolean keepRunning = true;
+
+    Sender(BlockingQueue<Map> queue, int pollQueueTimeMs, FusionPipelineClient fusion, int batchSize, Meter linesProcessed) {
+      this.queue = queue;
+      this.pollQueueTimeMs = pollQueueTimeMs;
+      this.fusion = fusion;
+      this.batchSize = batchSize;
+      this.batchOfDocs = new ArrayList<Map>(batchSize);
+      this.linesProcessed = linesProcessed;
+    }
+
+    public void stopRunning() {
+      this.keepRunning = false;
+    }
+
+    public void run() {
+
+      while (keepRunning || !queue.isEmpty()) {
+        Map doc = null;
+        try {
+          doc = queue.poll(pollQueueTimeMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+          // meh
+        }
+
+        if (doc == null) {
+          try {
+            Thread.sleep(100);
+          } catch (InterruptedException e) {}
+          continue;
+        }
+
+        // got a doc ... add it to the batch
+        batchOfDocs.add(doc);
+        if (batchOfDocs.size() >= batchSize) {
+          try {
+            fusion.postBatchToPipeline(batchOfDocs);
+            linesProcessed.mark(batchOfDocs.size());
+            docsSentByMe += batchOfDocs.size();
+          } catch (Exception exc) {
+            if (exc instanceof RuntimeException) {
+              throw (RuntimeException)exc;
+            } else {
+              throw new RuntimeException(exc);
+            }
+          } finally {
+            batchOfDocs.clear();
+          }
+        }
+      } // end while
+
+      // send any remaining docs
+      if (!batchOfDocs.isEmpty()) {
+        try {
+          fusion.postBatchToPipeline(batchOfDocs);
+          linesProcessed.mark(batchOfDocs.size());
+          docsSentByMe += batchOfDocs.size();
+        } catch (Exception exc) {
+          if (exc instanceof RuntimeException) {
+            throw (RuntimeException)exc;
+          } else {
+            throw new RuntimeException(exc);
+          }
+        } finally {
+          batchOfDocs.clear();
+        }
+      }
+
+      log.info("Sender thread "+Thread.currentThread().getName()+" ending after sending "+docsSentByMe+" docs");
     }
   }
 }
