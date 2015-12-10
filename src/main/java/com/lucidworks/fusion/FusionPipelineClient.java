@@ -31,9 +31,7 @@ import org.slf4j.LoggerFactory;
 import java.io.*;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.net.ConnectException;
 import java.net.MalformedURLException;
-import java.net.SocketException;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -75,7 +73,7 @@ public class FusionPipelineClient {
   AtomicInteger requestCounter = null;
   Map<String,Meter> metersByHost = new HashMap<>();
 
-  MetricRegistry metrics = null;
+  public static MetricRegistry metrics = null;
 
   static long maxNanosOfInactivity = TimeUnit.NANOSECONDS.convert(599, TimeUnit.SECONDS);
 
@@ -118,10 +116,6 @@ public class FusionPipelineClient {
     jsonObjectMapper = new ObjectMapper();
 
     requestCounter = new AtomicInteger(0);
-  }
-
-  public void setMetricsRegistry(MetricRegistry metrics) {
-    this.metrics = metrics;
   }
 
   protected Meter getMeterByHost(String meterName, String host) {

@@ -1,0 +1,1 @@
+Sep 20 00:00:00 dns-server.saccounty.net MSWinEventLog|1|Application|127996303|Sun Sep 20 00:00:00 2015|3|Lucent DNS Service|N/A|N/A|Information|dns-server.saccounty.net|None||client 10.0.0.1#60256: query: www.lucidworks.com IN A + (10.0.0.1)|127996302

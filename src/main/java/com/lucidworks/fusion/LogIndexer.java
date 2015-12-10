@@ -1,6 +1,8 @@
 package com.lucidworks.fusion;
 
 import com.codahale.metrics.ConsoleReporter;
+import com.codahale.metrics.Counter;
+import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
 import oi.thekraken.grok.api.Match;
 import org.apache.commons.cli.CommandLine;
@@ -27,6 +29,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
 import java.nio.file.Path;
@@ -40,13 +43,13 @@ import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import oi.thekraken.grok.api.Grok;
+import parsers.CustomLogLineParser;
 
 /**
  * Command-line utility for sending log messages to a Fusion pipeline.
@@ -184,7 +187,14 @@ public class LogIndexer {
                     .hasArg()
                     .isRequired(false)
                     .withDescription("Document ID field, default is id")
-                    .create("idFieldName")
+                    .create("idFieldName"),
+            OptionBuilder
+                    .withArgName("CLASS")
+                    .hasArg()
+                    .isRequired(false)
+                    .withDescription("Class name of a custom line parser, used when grok doesn't do the job; must implement the CustomLogLineParser interface")
+                    .create("lineParserClass")
+
     };
   }
 
@@ -207,11 +217,14 @@ public class LogIndexer {
   protected FusionPipelineClient fusion;
   protected int fusionBatchSize;
   protected ObjectMapper jsonMapper = new ObjectMapper();
-  public AtomicInteger docCounter = new AtomicInteger(0);
-  public AtomicInteger linesRead = new AtomicInteger(0);
-  public AtomicInteger parsedFiles = new AtomicInteger(0);
-  public AtomicInteger totalFiles = new AtomicInteger(0);
-  public AtomicInteger totalSkippedLines = new AtomicInteger(0);
+
+  public MetricRegistry metrics = new MetricRegistry();
+  public Meter linesProcessed = metrics.meter("linesProcessed");
+  public Counter docCounter = metrics.counter("docsToBeIndexed");
+  public Counter linesRead = metrics.counter("linesRead");
+  public Counter parsedFiles = metrics.counter("parsedFiles");
+  public Counter totalFiles = metrics.counter("totalFiles");
+  public Counter totalSkippedLines = metrics.counter("totalSkippedLines");
 
   protected long _startedAtMs = 0L;
   protected int poolSize = 10;
@@ -226,21 +239,24 @@ public class LogIndexer {
   protected boolean tail = false;
   protected long tailerDelayMs = 500;
   protected TailerReaperThread tailerReaperBgThread = null;
-
-  private static final MetricRegistry metrics = new MetricRegistry();
-  private static ConsoleReporter reporter = null;
+  protected CustomLogLineParser customLogLineParser = null;
+  private ConsoleReporter reporter = null;
 
   public void run(CommandLine cli) throws Exception {
+
     this.logDir = new File(cli.getOptionValue("dir"));
     if (!logDir.isDirectory())
       throw new FileNotFoundException(logDir.getAbsolutePath() + " not found!");
 
     String match = cli.getOptionValue("match", "*.log");
-
     if (match.startsWith("*.")) {
       String origMatch = match;
       match = "^.*?\\."+match.substring(2)+"$";
       log.info("Converted match="+origMatch+" to regex="+match);
+    } else if ("*".equals(match)) {
+      // match all files
+      match = "^.*$";
+      log.info("Converted match=* to regex="+match);
     }
 
     final Pattern matchLogsPattern = Pattern.compile(match);
@@ -308,6 +324,25 @@ public class LogIndexer {
       log.info("Initialized grok parser for pattern: "+grokPattern);
     }
 
+    // users can register a custom line parser if grok doesn't meet their needs
+    String lineParserClassArg = cli.getOptionValue("lineParserClass");
+    if (lineParserClassArg != null) {
+      Class lineParserClass = getClass().getClassLoader().loadClass(lineParserClassArg);
+      customLogLineParser = (CustomLogLineParser)lineParserClass.newInstance();
+      Method initMethod = null;
+      try {
+        initMethod = lineParserClass.getMethod("init", CommandLine.class);
+      } catch (NoSuchMethodError noSuchMethodError) {
+        // this is ok ... they don't have implement init if it's not needed
+      } catch (NoSuchMethodException nse) {
+        // ditto
+      }
+      if (initMethod != null) {
+        initMethod.invoke(customLogLineParser, cli);
+      }
+      log.info("Initialized custom log line parser: "+customLogLineParser);
+    }
+
     if (cli.hasOption("ignoreBefore")) {
       ignoreBeforeDate = ISO_8601_DATE_FMT.parse(cli.getOptionValue("ignoreBefore"));
       log.info("Will ignore any log messages that occurred before: " + ignoreBeforeDate);
@@ -346,11 +381,12 @@ public class LogIndexer {
 
     idFieldName = cli.getOptionValue("idFieldName", "id");
 
+    FusionPipelineClient.metrics = metrics;
+
     try {
       fusion = fusionAuthEnabled ?
               new FusionPipelineClient(fusionEndpoints, fusionUser, fusionPass, fusionRealm) :
               new FusionPipelineClient(fusionEndpoints);
-      fusion.setMetricsRegistry(metrics);
 
       log.info("Connected to Fusion. Processing log files in " + logDir.getAbsolutePath());
       processLogDir(fusion, logDir, matchedLogFiles, matchLogsPattern, alreadyProcessedFiles, restartAtLine);
@@ -448,7 +484,7 @@ public class LogIndexer {
         continue;
       }
       pool.submit(new FileParser(this, file, 0));
-      totalFiles.incrementAndGet();
+      totalFiles.inc();
     }
 
     if (watch) {
@@ -469,9 +505,9 @@ public class LogIndexer {
         if (numSleeps % 60 == 0) {
           double _diff = (double) (System.currentTimeMillis() - _startedAtMs);
           long tookSecs = _diff > 1000 ? Math.round(_diff / 1000d) : 1;
-          log.info("Processed " + parsedFiles.get() + " of " + totalFiles.get() + " files; running for: " + tookSecs +
-                  " (secs) to send " + (docCounter.get()) + " docs, read " + linesRead.get() +
-                  " lines; skipped: " + (linesRead.get() - docCounter.get()));
+          log.info("Processed " + parsedFiles.getCount() + " of " + totalFiles.getCount() + " files; running for: " + tookSecs +
+                  " (secs) to send " + (docCounter.getCount()) + " docs, read " + linesRead.getCount() +
+                  " lines; skipped: " + (linesRead.getCount() - docCounter.getCount()));
         }
       }
     } else {
@@ -479,9 +515,9 @@ public class LogIndexer {
       shutdownAndAwaitTermination(pool);
       double _diff = (double) (System.currentTimeMillis() - _startedAtMs);
       long tookSecs = _diff > 1000 ? Math.round(_diff / 1000d) : 1;
-      log.info("Processed " + parsedFiles.get() + " of " + totalFiles.get() + " files; took: " + tookSecs +
-              " (secs) to send " + (docCounter.get()) + " docs, read " + linesRead.get() +
-              " lines; skipped: " + (linesRead.get() - docCounter.get()));
+      log.info("Processed " + parsedFiles.getCount() + " of " + totalFiles.getCount() + " files; took: " + tookSecs +
+              " (secs) to send " + (docCounter.getCount()) + " docs, read " + linesRead.getCount() +
+              " lines; skipped: " + (linesRead.getCount() - docCounter.getCount()));
     }
   }
 
@@ -506,12 +542,13 @@ public class LogIndexer {
   protected void onFinishedParsingFile(String fileName, int lineNum, int skippedLines, long tookMs) {
     log.info("Finished processing log file " + fileName + ", took " + tookMs + " ms; skipped " + skippedLines + " out of " + lineNum + " lines");
 
-    totalSkippedLines.addAndGet(skippedLines);
+    totalSkippedLines.inc(skippedLines);
 
-    int fileCounter = parsedFiles.incrementAndGet();
-    int mod = fileCounter % 20;
+    parsedFiles.inc();
+    long fileCounter = parsedFiles.getCount();
+    long mod = fileCounter % 20;
     if (mod == 0) {
-      log.info("Processed " + fileCounter + " of " + totalFiles.get() + " files so far");
+      log.info("Processed " + fileCounter + " of " + totalFiles.getCount() + " files so far");
     }
 
     synchronized (this) {
@@ -540,52 +577,65 @@ public class LogIndexer {
       return null;
     }
 
-    if (grok != null) {
+    if (customLogLineParser != null) {
+      Map<String,Object> customMap = customLogLineParser.parseLine(fileName, lineNum, line, grok);
+      if (customMap != null) {
+        return buildPipelineDocFromMap(customMap, fileName, lineNum);
+      }
+    } else if (grok != null) {
       Match gm = grok.match(line);
       gm.captures();
       if (!gm.isNull()) {
-        Map grokMap = gm.toMap();
-
-        String docId = null;
-        Object idObj = grokMap.get(idFieldName);
-        if (idObj != null) {
-          docId = idObj.toString();
-        } else {
-          docId = String.format("%s/%d", fileName, lineNum);
-        }
-
-        Map<String,Object> doc = new HashMap<String,Object>();
-        doc.put("id", docId);
-        List fields = new ArrayList(grokMap.size());
-        for (Object key : grokMap.keySet()) {
-          Object val = grokMap.get(key);
-          if (val != null) {
-            fields.add(mapField(key.toString(), val));
-          }
-        }
-        doc.put("fields", fields);
-        return doc;
+        return buildPipelineDocFromMap(gm.toMap(), fileName, lineNum);
       }
     } else {
-      Map<String,Object> doc = new HashMap<String,Object>(3);
       if (line.startsWith("{") && line.endsWith("}")) {
-        // treat as JSON
+        // treat as JSON ... parse into a JSON map and the build a pipeline document structure (also a map)
         Map jsonMap = jsonMapper.readValue(line, Map.class);
+        return buildPipelineDocFromMap(jsonMap, fileName, lineNum);
       } else {
-        doc.put("id", String.format("%s/%d", fileName, lineNum));
+        Map<String,Object> doc = new HashMap<String,Object>(3);
+        doc.put("id", String.format("%s:%d", fileName, lineNum));
         List fields = new ArrayList(1);
         fields.add(mapField("_raw_content_", line));
         doc.put("fields", fields);
+        return doc;
       }
-      return doc;
     }
 
     return null;
   }
 
+  protected Map<String,Object> buildPipelineDocFromMap(Map grokMap, String fileName, int lineNum) {
+    String docId = null;
+    Object idObj = grokMap.get(idFieldName);
+    boolean hasIdField = false;
+    if (idObj != null) {
+      docId = idObj.toString();
+      hasIdField = true;
+    } else {
+      docId = String.format("%s:%d", fileName, lineNum);
+    }
+
+    Map<String,Object> doc = new HashMap<String,Object>(4);
+    doc.put("id", docId);
+    List fields = new ArrayList(grokMap.size());
+    for (Object key : grokMap.keySet()) {
+      Object val = grokMap.get(key);
+      if (val != null) {
+        fields.add(mapField(key.toString(), val));
+      }
+    }
+    if (hasIdField) {
+      fields.add(mapField("_src_", String.format("%s:%d", fileName, lineNum)));
+    }
+    doc.put("fields", fields);
+    return doc;
+  }
+
   protected final Map<String,Object> mapField(final String fieldName, final Object val) {
     Map<String,Object> fieldMap = new HashMap<String, Object>(10);
-    fieldMap.put("name", fieldName);
+    fieldMap.put("name", fieldName.toLowerCase());
     fieldMap.put("value", val);
     return fieldMap;
   }
@@ -718,13 +768,13 @@ public class LogIndexer {
                   for (File next : inDir) {
                     pool.submit(new FileParser(logIndexer, next, 0));
                     log.info("Scheduled new file '" + next + "' for parsing.");
-                    totalFiles.incrementAndGet();
+                    totalFiles.inc();
                   }
                 }
               } else {
                 pool.submit(new FileParser(logIndexer, newFile, 0));
                 log.info("Scheduled new file '" + newFile + "' for parsing.");
-                totalFiles.incrementAndGet();
+                totalFiles.inc();
               }
             }
           }
@@ -767,7 +817,7 @@ public class LogIndexer {
         lastEventAtMs = System.currentTimeMillis();
       }
 
-      logIndexer.linesRead.incrementAndGet();
+      logIndexer.linesRead.inc();
 
       ++lineNum;
 
@@ -790,11 +840,12 @@ public class LogIndexer {
 
       if (doc != null) {
         batchOfDocs.add(doc);
-        docCounter.incrementAndGet();
+        docCounter.inc();
 
         if (batchOfDocs.size() >= logIndexer.fusionBatchSize) {
           try {
             logIndexer.fusion.postBatchToPipeline(batchOfDocs);
+            linesProcessed.mark(batchOfDocs.size());
           } catch (Exception exc) {
             if (exc instanceof RuntimeException) {
               throw (RuntimeException)exc;
@@ -809,8 +860,8 @@ public class LogIndexer {
         ++skippedLines;
       }
 
-      if (lineNum > 200000) {
-        if (lineNum % 20000 == 0) {
+      if (lineNum > 10000) {
+        if (lineNum % 10000 == 0) {
           long diffMs = System.currentTimeMillis() - startMs;
           log.info("Processed " + lineNum + " lines in " + fileName + "; running for " + diffMs + " ms");
         }
@@ -871,6 +922,7 @@ public class LogIndexer {
 
         if (!batchOfDocs.isEmpty()) {
           logIndexer.fusion.postBatchToPipeline(batchOfDocs);
+          linesProcessed.mark(batchOfDocs.size());
           batchOfDocs.clear();
         }
 
