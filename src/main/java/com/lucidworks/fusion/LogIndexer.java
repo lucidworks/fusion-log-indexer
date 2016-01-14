@@ -13,6 +13,7 @@ import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.io.input.Tailer;
 import org.apache.commons.io.input.TailerListenerAdapter;
+import org.jctools.queues.QueueFactory;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
@@ -33,6 +34,8 @@ import java.util.regex.Pattern;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 
 import parsers.LogLineParser;
+
+import org.jctools.queues.spec.ConcurrentQueueSpec;
 
 /**
  * Command-line utility for sending log messages to a Fusion pipeline.
@@ -246,7 +249,7 @@ public class LogIndexer {
   protected String charsetName = null;
   protected String lineDelimiter = null;
 
-  protected BlockingQueue<Map> docsToIndexQueue;
+  protected Queue<Map> docsToIndexQueue;
 
   public void run(CommandLine cli) throws Exception {
 
@@ -352,9 +355,10 @@ public class LogIndexer {
 
     FusionPipelineClient.metrics = metrics;
 
-    // setup the queue for holding docs to index
-    docsToIndexQueue =
-            new LinkedBlockingQueue<Map>(Integer.parseInt(cli.getOptionValue("docsToIndexQueueSize", "1000000")));
+    // setup a multiple producer / multiple consumer queue for holding docs to index
+    ConcurrentQueueSpec queueSpec =
+            ConcurrentQueueSpec.createBoundedMpmc(Integer.parseInt(cli.getOptionValue("docsToIndexQueueSize", "1000000")));
+    docsToIndexQueue = QueueFactory.newQueue(queueSpec);
 
     String senderThreads = cli.getOptionValue("senderThreads");
     int numFusionEndpoints = fusionEndpoints.split(",").length;
@@ -972,7 +976,7 @@ public class LogIndexer {
 
   class Sender implements Runnable {
 
-    BlockingQueue<Map> queue;
+    Queue<Map> queue;
     int pollQueueTimeMs;
     List<Map> batchOfDocs;
     int batchSize;
@@ -981,7 +985,7 @@ public class LogIndexer {
     long docsSentByMe = 0;
     volatile boolean keepRunning = true;
 
-    Sender(BlockingQueue<Map> queue, int pollQueueTimeMs, FusionPipelineClient fusion, int batchSize, Meter linesProcessed) {
+    Sender(Queue<Map> queue, int pollQueueTimeMs, FusionPipelineClient fusion, int batchSize, Meter linesProcessed) {
       this.queue = queue;
       this.pollQueueTimeMs = pollQueueTimeMs;
       this.fusion = fusion;
@@ -997,12 +1001,13 @@ public class LogIndexer {
     public void run() {
 
       while (keepRunning || !queue.isEmpty()) {
-        Map doc = null;
-        try {
-          doc = queue.poll(pollQueueTimeMs, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException ignore) {}
-        if (doc == null)
+        Map doc = doc = queue.poll();
+        if (doc == null) {
+          try {
+            Thread.sleep(pollQueueTimeMs);
+          } catch (InterruptedException ie){}
           continue;
+        }
 
         // got a doc ... add it to the batch
         batchOfDocs.add(doc);
