@@ -1,0 +1,3 @@
+HANDLER %{WORD}.%{WORD}.%{WORD}.%{WORD}.%{WORD}
+SOLR_QUERY \[collection%{NUMBER:collection}\]\s+webapp=/%{WORD:webapp}\s+path=/%{WORD:path}\s+params=\{%{GREEDYDATA:params}\}\s+hits=%{NUMBER:hits}\s+status=%{NUMBER:status}\s+QTime=%{NUMBER:QTime}
+SOLR_LOG %{LOGLEVEL}\s+-\s%{TIMESTAMP_ISO8601};\s%{JAVACLASS};\s+%{MESSAGE:message}
