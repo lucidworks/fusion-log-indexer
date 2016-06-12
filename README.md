@@ -25,9 +25,9 @@ The output JAR file is in the target directory
 
 ### Examples
 
-1. ```java -jar ./target/fusion-log-indexer-1.0-exe.jar -dir ~/projects/content/lucid/lucidfind/logs/  
+1. Send logs in 500 at a time to the my_collection collection using the default pipeline:```java -jar ./target/fusion-log-indexer-1.0-exe.jar -dir ~/projects/content/lucid/lucidfind/logs/  
  -fusion "http://localhost:8764/api/apollo/index-pipelines/my_collection-default/collections/my_collection/index" 
- -fusionUser USER_HERE -fusionPass PASSWORD_HERE -senderThreads 4 -fusionBatchSize 500 --verbose   -lineParserConfig sample-properties/apachelogs-grok-parser.properties
+ -fusionUser USER_HERE -fusionPass PASSWORD_HERE -senderThreads 4 -fusionBatchSize 500 --verbose   -lineParserConfig sample-properties/oldlucidfind-grok-parser.properties```
  
 # Contributing
  
