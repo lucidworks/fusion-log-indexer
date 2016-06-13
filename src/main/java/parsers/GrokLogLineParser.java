@@ -1,5 +1,6 @@
 package parsers;
 
+import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -35,11 +36,31 @@ public class GrokLogLineParser implements LogLineParser {
 
   public void init(Properties config) throws Exception {
     // setup grok
-    String grokPatternFile = config.getProperty("grokPatternFile", "patterns/grok-patterns");
+    grok = new Grok();
+    String grokPatternDir = config.getProperty("grokPatternDir", "src/main/resources/patterns");
+    //loop over and add all the pattern files in the directory
+    if (grokPatternDir != null) {
+      File patternDir = new File(grokPatternDir);
+      if (patternDir.exists() && patternDir.isDirectory()){
+        File[] patterns = patternDir.listFiles();
+        if (patterns != null && patterns.length > 0) {
+          for (File pattern : patterns) {
+            log.info("Loading pattern {} from {}", pattern, patternDir);
+            grok.addPatternFromFile(pattern.getAbsolutePath());
+          }
+        } else {
+          log.warn("grokPatternDir specified, but no patterns present");
+        }
+      } else {
+        log.error("Unable to find grokPatternDir: " + grokPatternDir);
+      }
+    }
 
+
+    String grokPatternFile = config.getProperty("grokPatternFile", "patterns/grok-patterns");
     if (grokPatternFile.startsWith("patterns/")) {
       // load built-in from classpath
-      grok = new Grok();
+
       InputStreamReader isr = null;
       try {
         InputStream in = getClass().getClassLoader().getResourceAsStream(grokPatternFile);
@@ -57,7 +78,7 @@ public class GrokLogLineParser implements LogLineParser {
       }
     } else {
       // initialize from an external file
-      grok = Grok.create(grokPatternFile);
+      grok.addPatternFromFile(grokPatternFile);
     }
 
     grokPattern = config.getProperty("grokPattern");
