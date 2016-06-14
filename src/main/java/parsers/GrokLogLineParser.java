@@ -7,6 +7,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
 import java.util.Map;
 import java.util.Properties;
@@ -24,13 +25,14 @@ public class GrokLogLineParser implements LogLineParser {
   public static final String ISO_8601_TIMESTAMP_FIELD_PROP = "iso8601TimestampFieldName";
   public static final String LOG_DATE_FIELD_PROP = "dateFieldName";
   public static final String LOG_DATE_FORMAT_PROP = "dateFieldFormat";
+  public static final String UNMATCHED_LINE_PROP = "unmatchedLineName";
 
   protected Grok grok;
   protected String grokPattern;
   protected String dateFieldName = null;
   protected String dateFieldFormat = null;
   protected String timestampFieldName = null;
-
+  protected String unmatchedLineName = null;
   protected ThreadLocal<SimpleDateFormat> df = null;
   protected ThreadLocal<SimpleDateFormat> iso8601 = null;
 
@@ -56,6 +58,7 @@ public class GrokLogLineParser implements LogLineParser {
       }
     }
 
+    unmatchedLineName = config.getProperty(UNMATCHED_LINE_PROP);
 
     String grokPatternFile = config.getProperty("grokPatternFile", "patterns/grok-patterns");
     if (grokPatternFile.startsWith("patterns/")) {
@@ -122,8 +125,13 @@ public class GrokLogLineParser implements LogLineParser {
     Match gm = grok.match(line);
     gm.captures();
 
-    if (gm.isNull())
-      return null;
+    if (gm.isNull()){
+      if (unmatchedLineName != null && unmatchedLineName.isEmpty() == false){
+        return Collections.<String, Object>singletonMap(unmatchedLineName, line);
+      } else {
+        return null;
+      }
+    }
 
     Map<String,Object> grokMap = gm.toMap();
 
