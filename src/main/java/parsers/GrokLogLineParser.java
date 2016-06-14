@@ -1,11 +1,13 @@
 package parsers;
 
+import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
 import java.util.Map;
 import java.util.Properties;
@@ -23,23 +25,45 @@ public class GrokLogLineParser implements LogLineParser {
   public static final String ISO_8601_TIMESTAMP_FIELD_PROP = "iso8601TimestampFieldName";
   public static final String LOG_DATE_FIELD_PROP = "dateFieldName";
   public static final String LOG_DATE_FORMAT_PROP = "dateFieldFormat";
+  public static final String UNMATCHED_LINE_PROP = "unmatchedLineName";
 
   protected Grok grok;
   protected String grokPattern;
   protected String dateFieldName = null;
   protected String dateFieldFormat = null;
   protected String timestampFieldName = null;
-
+  protected String unmatchedLineName = null;
   protected ThreadLocal<SimpleDateFormat> df = null;
   protected ThreadLocal<SimpleDateFormat> iso8601 = null;
 
   public void init(Properties config) throws Exception {
     // setup grok
-    String grokPatternFile = config.getProperty("grokPatternFile", "patterns/grok-patterns");
+    grok = new Grok();
+    String grokPatternDir = config.getProperty("grokPatternDir", "src/main/resources/patterns");
+    //loop over and add all the pattern files in the directory
+    if (grokPatternDir != null) {
+      File patternDir = new File(grokPatternDir);
+      if (patternDir.exists() && patternDir.isDirectory()){
+        File[] patterns = patternDir.listFiles();
+        if (patterns != null && patterns.length > 0) {
+          for (File pattern : patterns) {
+            log.info("Loading pattern {} from {}", pattern, patternDir);
+            grok.addPatternFromFile(pattern.getAbsolutePath());
+          }
+        } else {
+          log.warn("grokPatternDir specified, but no patterns present");
+        }
+      } else {
+        log.error("Unable to find grokPatternDir: " + grokPatternDir);
+      }
+    }
 
+    unmatchedLineName = config.getProperty(UNMATCHED_LINE_PROP);
+
+    String grokPatternFile = config.getProperty("grokPatternFile", "patterns/grok-patterns");
     if (grokPatternFile.startsWith("patterns/")) {
       // load built-in from classpath
-      grok = new Grok();
+
       InputStreamReader isr = null;
       try {
         InputStream in = getClass().getClassLoader().getResourceAsStream(grokPatternFile);
@@ -57,7 +81,7 @@ public class GrokLogLineParser implements LogLineParser {
       }
     } else {
       // initialize from an external file
-      grok = Grok.create(grokPatternFile);
+      grok.addPatternFromFile(grokPatternFile);
     }
 
     grokPattern = config.getProperty("grokPattern");
@@ -101,8 +125,13 @@ public class GrokLogLineParser implements LogLineParser {
     Match gm = grok.match(line);
     gm.captures();
 
-    if (gm.isNull())
-      return null;
+    if (gm.isNull()){
+      if (unmatchedLineName != null && unmatchedLineName.isEmpty() == false){
+        return Collections.<String, Object>singletonMap(unmatchedLineName, line);
+      } else {
+        return null;
+      }
+    }
 
     Map<String,Object> grokMap = gm.toMap();
 

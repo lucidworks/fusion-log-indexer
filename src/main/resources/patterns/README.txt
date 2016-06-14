@@ -1,0 +1,1 @@
+See https://github.com/logstash-plugins/logstash-patterns-core/tree/master/patterns

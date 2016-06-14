@@ -1,0 +1,3 @@
+# Parses the Lucidworks Enterprise logs.  Requires grok-patterns
+
+OLDLUCIDFIND %{IPORHOST:clientip}(?:%{SPACE})(?:%{USER:ident}|-)(?:%{SPACE})(?:%{USER:auth}|-)(?:%{SPACE})\[%{HTTPDATE:timestamp}\](?:%{SPACE})"%{WORD:verb}(?:%{SPACE})%{DATA:rawrequest}(?: HTTP/%{NUMBER:httpversion})"(?:%{SPACE})%{NUMBER:response}(?:%{SPACE})(?:%{NUMBER:bytes}|-)(?:%{SPACE})(?:%{NUMBER:timing}|-)
