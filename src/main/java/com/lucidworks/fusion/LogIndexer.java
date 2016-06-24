@@ -229,6 +229,9 @@ public class LogIndexer {
 
   public MetricRegistry metrics = new MetricRegistry();
   public Meter linesProcessed = metrics.meter("linesProcessed");
+
+  public Counter linesParsed = metrics.counter("linesParsed");
+
   public Counter docCounter = metrics.counter("docsToBeIndexed");
   public Counter linesRead = metrics.counter("linesRead");
   public Counter parsedFiles = metrics.counter("parsedFiles");
@@ -558,7 +561,7 @@ public class LogIndexer {
           long tookSecs = _diff > 1000 ? Math.round(_diff / 1000d) : 1;
           log.info("Processed " + parsedFiles.getCount() + " of " + totalFiles.getCount() + " files; running for: " + tookSecs +
                   " (secs) to send " + (docCounter.getCount()) + " docs, read " + linesRead.getCount() +
-                  " lines; skipped: " + (linesRead.getCount() - docCounter.getCount()));
+                  " lines; skipped: " + (linesRead.getCount() - linesParsed.getCount()));
         }
       }
     } else {
@@ -568,7 +571,7 @@ public class LogIndexer {
       long tookSecs = _diff > 1000 ? Math.round(_diff / 1000d) : 1;
       log.info("Processed " + parsedFiles.getCount() + " of " + totalFiles.getCount() + " files; took: " + tookSecs +
               " (secs) to send " + (docCounter.getCount()) + " docs, read " + linesRead.getCount() +
-              " lines; skipped: " + (linesRead.getCount() - docCounter.getCount()));
+              " lines; skipped: " + (linesRead.getCount() - linesParsed.getCount()));
     }
   }
 
@@ -818,6 +821,7 @@ public class LogIndexer {
     Tailer tailer = null;
     Map<String,Object> multilineDoc = null;
     MultilineParser multilineParser = null;
+    int numMultilines = 0;
 
     FileParser(LogIndexer logIndexer, File fileToParse, int skipOver) {
       this.logIndexer = logIndexer;
@@ -830,6 +834,7 @@ public class LogIndexer {
 
       this.multilineParser = (logIndexer.logLineParser instanceof MultilineParser) ? (MultilineParser)logIndexer.logLineParser : null;
       this.multilineDoc = (this.multilineParser != null) ? new HashMap<String,Object>() : null;
+      this.numMultilines = 0;
     }
 
     public void handle(String line) {
@@ -856,17 +861,26 @@ public class LogIndexer {
         try {
           MultilinePart part = multilineParser.parseNextPart(fileName, lineNum, line);
           if (part.state == MultilinePart.MultilineState.START) {
+            numMultilines = 0;
             multilineDoc.clear();
+            ++numMultilines;
             multilineDoc.putAll(part.part);
             return;  // must return to keep parsing lines of this multiline log entry
           } else if (part.state == MultilinePart.MultilineState.CONT) {
+            ++numMultilines;
             multilineDoc.putAll(part.part);
             return; // must return to keep parsing lines of this multiline log entry
+          } else if (part.state == MultilinePart.MultilineState.SKIP) {
+            log.warn("Multi-line parser "+multilineParser.toString()+" skipped line "+lineNum+" in "+fileName);
+            ++skippedLines;
           } else {
+            ++numMultilines;
             multilineDoc.putAll(part.part);
             doc = new HashMap<String,Object>();
             doc.putAll(multilineDoc);
             multilineDoc.clear();
+            linesParsed.inc(numMultilines);
+            numMultilines = 0;
           }
         } catch (Exception exc) {
           log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
@@ -885,6 +899,9 @@ public class LogIndexer {
         // queue this doc to be consumed by a Fusion sender thread
         docsToIndexQueue.offer(doc);
         docCounter.inc();
+        if (multilineParser == null) {
+          linesParsed.inc();
+        }
       } else {
         ++skippedLines;
       }
