@@ -822,6 +822,8 @@ public class LogIndexer {
     Map<String,Object> multilineDoc = null;
     MultilineParser multilineParser = null;
     int numMultilines = 0;
+    int multilineStart = 0;
+    MultilinePart.MultilineState prevState = MultilinePart.MultilineState.END;
 
     FileParser(LogIndexer logIndexer, File fileToParse, int skipOver) {
       this.logIndexer = logIndexer;
@@ -861,21 +863,44 @@ public class LogIndexer {
         try {
           MultilinePart part = multilineParser.parseNextPart(fileName, lineNum, line);
           if (part.state == MultilinePart.MultilineState.START) {
+
+            // validate that we're starting in a good state
+            if (prevState != MultilinePart.MultilineState.END) {
+              log.error("Multiline parse error at line "+lineNum+" in "+fileName+
+                      "! Encountered a START pattern ("+line+") while the parser's previous state is "+prevState);
+              ++skippedLines;
+              return;
+            }
+
+            prevState = part.state;
+            multilineStart = lineNum;
             numMultilines = 0;
             multilineDoc.clear();
             ++numMultilines;
             multilineDoc.putAll(part.part);
             return;  // must return to keep parsing lines of this multiline log entry
           } else if (part.state == MultilinePart.MultilineState.CONT) {
+            prevState = part.state;
             ++numMultilines;
             multilineDoc.putAll(part.part);
             return; // must return to keep parsing lines of this multiline log entry
           } else if (part.state == MultilinePart.MultilineState.SKIP) {
+            prevState = part.state;
             log.warn("Multi-line parser "+multilineParser.toString()+" skipped line "+lineNum+" in "+fileName);
             ++skippedLines;
+            return;
           } else {
+            prevState = part.state;
             ++numMultilines;
             multilineDoc.putAll(part.part);
+
+            if (multilineDoc.isEmpty()) {
+              log.error("No fields read by multi-line parser for lines: "+multilineStart+" to "+lineNum+" in "+fileName);
+              skippedLines += numMultilines;
+              numMultilines = 0;
+              multilineStart = 0;
+              return;
+            }
 
             // invoke a callback on the parser to allow any post-processing
             // it might need to do once all lines have been parsed for this event
@@ -886,6 +911,7 @@ public class LogIndexer {
             multilineDoc.clear();
             linesParsed.inc(numMultilines);
             numMultilines = 0;
+            multilineStart = 0;
           }
         } catch (Exception exc) {
           log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
