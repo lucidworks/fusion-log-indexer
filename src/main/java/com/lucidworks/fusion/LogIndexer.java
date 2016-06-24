@@ -876,6 +876,11 @@ public class LogIndexer {
           } else {
             ++numMultilines;
             multilineDoc.putAll(part.part);
+
+            // invoke a callback on the parser to allow any post-processing
+            // it might need to do once all lines have been parsed for this event
+            multilineParser.afterAllLinesRead(multilineDoc);
+
             doc = new HashMap<String,Object>();
             doc.putAll(multilineDoc);
             multilineDoc.clear();

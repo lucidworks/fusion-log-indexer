@@ -29,12 +29,18 @@ public class XmlMultilineParser implements LogLineParser, MultilineParser {
     } else if (line.startsWith(fieldPfx) && line.endsWith(fieldSfx)) {
       String sub = line.substring(fieldPfx.length(), line.length()-fieldSfx.length());
       int at = sub.indexOf("\"");
-      String key = sub.substring(0,at);
+      String key = sub.substring(0, at);
       Object val = sub.substring(at+2); // skip over >
       part = new MultilinePart(MultilinePart.MultilineState.CONT, Collections.singletonMap(key,val));
     } else {
       part = new MultilinePart(MultilinePart.MultilineState.SKIP, Collections.EMPTY_MAP);
     }
     return part;
+  }
+
+  @Override
+  public void afterAllLinesRead(Map<String, Object> mutable) {
+    // TODO: do some post-processing after all lines have been read into the map
+    // such as maybe combining separate date and time fields into a timestamp
   }
 }
