@@ -36,6 +36,8 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import parsers.LogLineParser;
 
 import org.jctools.queues.spec.ConcurrentQueueSpec;
+import parsers.MultilineParser;
+import parsers.MultilinePart;
 
 /**
  * Command-line utility for sending log messages to a Fusion pipeline.
@@ -814,6 +816,8 @@ public class LogIndexer {
     long startMs;
     long lastEventAtMs = 0l;
     Tailer tailer = null;
+    Map<String,Object> multilineDoc = null;
+    MultilineParser multilineParser = null;
 
     FileParser(LogIndexer logIndexer, File fileToParse, int skipOver) {
       this.logIndexer = logIndexer;
@@ -823,6 +827,9 @@ public class LogIndexer {
       this.batchOfDocs = new ArrayList(logIndexer.fusionBatchSize);
       this.lineNum = 0;
       this.startMs = 0L;
+
+      this.multilineParser = (logIndexer.logLineParser instanceof MultilineParser) ? (MultilineParser)logIndexer.logLineParser : null;
+      this.multilineDoc = (this.multilineParser != null) ? new HashMap<String,Object>() : null;
     }
 
     public void handle(String line) {
@@ -845,11 +852,33 @@ public class LogIndexer {
         return;
 
       Map<String,Object> doc = null;
-      try {
-        doc = logIndexer.parseLogLine(fileName, lineNum, line);
-      } catch (Exception exc) {
-        // TODO: guard against flood of errors here
-        log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
+      if (multilineParser != null) {
+        try {
+          MultilinePart part = multilineParser.parseNextPart(fileName, lineNum, line);
+          if (part.state == MultilinePart.MultilineState.START) {
+            multilineDoc.clear();
+            multilineDoc.putAll(part.part);
+            return;  // must return to keep parsing lines of this multiline log entry
+          } else if (part.state == MultilinePart.MultilineState.CONT) {
+            multilineDoc.putAll(part.part);
+            return; // must return to keep parsing lines of this multiline log entry
+          } else {
+            multilineDoc.putAll(part.part);
+            doc = new HashMap<String,Object>();
+            doc.putAll(multilineDoc);
+            multilineDoc.clear();
+          }
+        } catch (Exception exc) {
+          log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
+          return;
+        }
+      } else {
+        try {
+          doc = logIndexer.parseLogLine(fileName, lineNum, line);
+        } catch (Exception exc) {
+          // TODO: guard against flood of errors here
+          log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
+        }
       }
 
       if (doc != null) {
