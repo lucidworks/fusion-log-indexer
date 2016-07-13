@@ -14,4 +14,8 @@ public class MultilinePart {
     this.state = state;
     this.part = part;
   }
+
+  public String toString() {
+    return state+" "+part;
+  }
 }

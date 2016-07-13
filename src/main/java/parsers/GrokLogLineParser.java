@@ -7,11 +7,7 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Map;
-import java.util.Properties;
-import java.util.TimeZone;
+import java.util.*;
 
 import oi.thekraken.grok.api.Grok;
 import oi.thekraken.grok.api.Match;
@@ -20,25 +16,8 @@ import org.slf4j.LoggerFactory;
 
 public class GrokLogLineParser implements LogLineParser {
 
-  public static Logger log = LoggerFactory.getLogger(GrokLogLineParser.class);
-
-  public static final String ISO_8601_TIMESTAMP_FIELD_PROP = "iso8601TimestampFieldName";
-  public static final String LOG_DATE_FIELD_PROP = "dateFieldName";
-  public static final String LOG_DATE_FORMAT_PROP = "dateFieldFormat";
-  public static final String UNMATCHED_LINE_PROP = "unmatchedLineName";
-
-  protected Grok grok;
-  protected String grokPattern;
-  protected String dateFieldName = null;
-  protected String dateFieldFormat = null;
-  protected String timestampFieldName = null;
-  protected String unmatchedLineName = null;
-  protected ThreadLocal<SimpleDateFormat> df = null;
-  protected ThreadLocal<SimpleDateFormat> iso8601 = null;
-
-  public void init(Properties config) throws Exception {
-    // setup grok
-    grok = new Grok();
+  public static final Grok setupGrok(Properties config) throws Exception {
+    Grok grok = new Grok();
     String grokPatternDir = config.getProperty("grokPatternDir", "src/main/resources/patterns");
     //loop over and add all the pattern files in the directory
     if (grokPatternDir != null) {
@@ -47,7 +26,7 @@ public class GrokLogLineParser implements LogLineParser {
         File[] patterns = patternDir.listFiles();
         if (patterns != null && patterns.length > 0) {
           for (File pattern : patterns) {
-            log.info("Loading pattern {} from {}", pattern, patternDir);
+            log.debug("Loading pattern {} from {}", pattern, patternDir);
             grok.addPatternFromFile(pattern.getAbsolutePath());
           }
         } else {
@@ -58,15 +37,13 @@ public class GrokLogLineParser implements LogLineParser {
       }
     }
 
-    unmatchedLineName = config.getProperty(UNMATCHED_LINE_PROP);
-
     String grokPatternFile = config.getProperty("grokPatternFile", "patterns/grok-patterns");
     if (grokPatternFile.startsWith("patterns/")) {
       // load built-in from classpath
 
       InputStreamReader isr = null;
       try {
-        InputStream in = getClass().getClassLoader().getResourceAsStream(grokPatternFile);
+        InputStream in = GrokLogLineParser.class.getClassLoader().getResourceAsStream(grokPatternFile);
         if (in == null)
           throw new FileNotFoundException(grokPatternFile+" not found on classpath!");
 
@@ -84,11 +61,39 @@ public class GrokLogLineParser implements LogLineParser {
       grok.addPatternFromFile(grokPatternFile);
     }
 
-    grokPattern = config.getProperty("grokPattern");
+    String grokPattern = config.getProperty("grokPattern");
     if (grokPattern == null || grokPattern.isEmpty())
       throw new IllegalArgumentException("Must specify a grokPattern!");
 
     grok.compile(grokPattern);
+
+    return grok;
+  }
+
+  public static Logger log = LoggerFactory.getLogger(GrokLogLineParser.class);
+
+  public static final String ISO_8601_TIMESTAMP_FIELD_PROP = "iso8601TimestampFieldName";
+  public static final String LOG_DATE_FIELD_PROP = "dateFieldName";
+  public static final String LOG_DATE_FORMAT_PROP = "dateFieldFormat";
+  public static final String UNMATCHED_LINE_PROP = "unmatchedLineName";
+
+  protected Properties config;
+  protected Grok grok;
+  protected String grokPattern;
+  protected String dateFieldName = null;
+  protected String dateFieldFormat = null;
+  protected String timestampFieldName = null;
+  protected String unmatchedLineName = null;
+  protected ThreadLocal<SimpleDateFormat> df = null;
+  protected ThreadLocal<SimpleDateFormat> iso8601 = null;
+
+  public void init(Properties config) throws Exception {
+    this.config = config;
+
+    unmatchedLineName = config.getProperty(UNMATCHED_LINE_PROP);
+
+    // setup grok
+    grok = setupGrok(config);
 
     // optionally, we can set the iso 8601 timestamp field on each log message by parsing a custom date in the log
     timestampFieldName = config.getProperty(ISO_8601_TIMESTAMP_FIELD_PROP);
@@ -155,6 +160,27 @@ public class GrokLogLineParser implements LogLineParser {
       }
     }
     return timestamp;
+  }
+
+  public static Map<String,Object> pruneEmpty(Map<String,Object> grokMap) {
+    Map<String,Object> prunedMap = new HashMap<>();
+    for (String key : grokMap.keySet()) {
+      if ("ignored".equals(key))
+        continue;
+
+      Object val = grokMap.get(key);
+      if (val != null) {
+        if (val instanceof String) {
+          String str = (String)val;
+          if (!str.trim().isEmpty()) {
+            prunedMap.put(key, str);
+          }
+        } else {
+          prunedMap.put(key, val);
+        }
+      }
+    }
+    return prunedMap;
   }
 
   @Override

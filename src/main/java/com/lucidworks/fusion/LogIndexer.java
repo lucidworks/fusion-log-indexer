@@ -205,7 +205,11 @@ public class LogIndexer {
                     .hasArg()
                     .isRequired(false)
                     .withDescription("Milliseconds to wait to see a document on the queue; defaults to 200 ms")
-                    .create("pollQueueTimeMs")
+                    .create("pollQueueTimeMs"),
+            OptionBuilder
+                    .isRequired(false)
+                    .withDescription("Set this flag if you only want to run through the parsing and skip indexing")
+                    .create("parseOnly")
     };
   }
 
@@ -370,24 +374,28 @@ public class LogIndexer {
     int numSenderThreads = (senderThreads != null) ? Integer.parseInt(senderThreads) : 2*numFusionEndpoints;
     int pollQueueTimeMs = Integer.parseInt(cli.getOptionValue("pollQueueTimeMs","200"));
 
-    try {
-      fusion = fusionAuthEnabled ?
-              new FusionPipelineClient(fusionEndpoints, fusionUser, fusionPass, fusionRealm) :
-              new FusionPipelineClient(fusionEndpoints);
-      log.info("Connected to Fusion. Processing log files in " + logDir.getAbsolutePath());
+    boolean parseOnly = cli.hasOption("parseOnly");
 
-      // setup a pool of sender threads ...
+    try {
       Sender[] senders = new Sender[numSenderThreads];
-      for (int s=0; s < senders.length; s++)
-        senders[s] = new Sender(docsToIndexQueue, pollQueueTimeMs, fusion, fusionBatchSize, linesProcessed);
       ExecutorService senderThreadPool = Executors.newFixedThreadPool(numSenderThreads);
-      for (int s=0; s < senders.length; s++)
-        senderThreadPool.submit(senders[s]);
-      log.info("Created "+numSenderThreads+" sender threads (queue consumers) to send docs to "+numFusionEndpoints+" Fusion endpoints.");
+      if (!parseOnly) {
+        fusion = fusionAuthEnabled ?
+                new FusionPipelineClient(fusionEndpoints, fusionUser, fusionPass, fusionRealm) :
+                new FusionPipelineClient(fusionEndpoints);
+        log.info("Connected to Fusion. Processing log files in " + logDir.getAbsolutePath());
+
+        // setup a pool of sender threads ...
+        for (int s=0; s < senders.length; s++)
+          senders[s] = new Sender(docsToIndexQueue, pollQueueTimeMs, fusion, fusionBatchSize, linesProcessed);
+        for (int s=0; s < senders.length; s++)
+          senderThreadPool.submit(senders[s]);
+        log.info("Created "+numSenderThreads+" sender threads (queue consumers) to send docs to "+numFusionEndpoints+" Fusion endpoints.");
+      }
 
       processLogDir(fusion, logDir, matchedLogFiles, matchLogsPattern, alreadyProcessedFiles, restartAtLine);
 
-      if (!watch) {
+      if (!parseOnly && !watch) {
 
         for (int s=0; s < senders.length; s++)
           senders[s].stopRunning();
@@ -819,11 +827,7 @@ public class LogIndexer {
     long startMs;
     long lastEventAtMs = 0l;
     Tailer tailer = null;
-    Map<String,Object> multilineDoc = null;
-    MultilineParser multilineParser = null;
-    int numMultilines = 0;
-    int multilineStart = 0;
-    MultilinePart.MultilineState prevState = MultilinePart.MultilineState.END;
+    MultilineSupport multilineSupport = null;
 
     FileParser(LogIndexer logIndexer, File fileToParse, int skipOver) {
       this.logIndexer = logIndexer;
@@ -834,9 +838,19 @@ public class LogIndexer {
       this.lineNum = 0;
       this.startMs = 0L;
 
-      this.multilineParser = (logIndexer.logLineParser instanceof MultilineParser) ? (MultilineParser)logIndexer.logLineParser : null;
-      this.multilineDoc = (this.multilineParser != null) ? new HashMap<String,Object>() : null;
-      this.numMultilines = 0;
+      if (logIndexer.logLineParser instanceof MultilineParser) {
+        this.multilineSupport = new MultilineSupport((MultilineParser)logIndexer.logLineParser);
+      }
+    }
+
+    public void afterLastLine() {
+      if (multilineSupport != null) {
+        Map<String,Object> doc = multilineSupport.afterLastLine();
+        if (doc != null) {
+          docsToIndexQueue.offer(doc);
+          docCounter.inc();
+        }
+      }
     }
 
     public void handle(String line) {
@@ -846,7 +860,6 @@ public class LogIndexer {
       }
 
       logIndexer.linesRead.inc();
-
       ++lineNum;
 
       if (lineNum < skipOver) {
@@ -855,74 +868,20 @@ public class LogIndexer {
       }
 
       line = line.trim();
-      if (line.length() == 0)
+      if (line.length() == 0) {
+        linesParsed.inc();
         return;
+      }
 
       Map<String,Object> doc = null;
-      if (multilineParser != null) {
-        try {
-          MultilinePart part = multilineParser.parseNextPart(fileName, lineNum, line);
-          if (part.state == MultilinePart.MultilineState.START) {
-
-            // validate that we're starting in a good state
-            if (prevState != MultilinePart.MultilineState.END) {
-              log.error("Multiline parse error at line "+lineNum+" in "+fileName+
-                      "! Encountered a START pattern ("+line+") while the parser's previous state is "+prevState);
-              ++skippedLines;
-              return;
-            }
-
-            prevState = part.state;
-            multilineStart = lineNum;
-            numMultilines = 0;
-            multilineDoc.clear();
-            ++numMultilines;
-            multilineDoc.putAll(part.part);
-            return;  // must return to keep parsing lines of this multiline log entry
-          } else if (part.state == MultilinePart.MultilineState.CONT) {
-            prevState = part.state;
-            ++numMultilines;
-            multilineDoc.putAll(part.part);
-            return; // must return to keep parsing lines of this multiline log entry
-          } else if (part.state == MultilinePart.MultilineState.SKIP) {
-            prevState = part.state;
-            log.warn("Multi-line parser "+multilineParser.toString()+" skipped line "+lineNum+" in "+fileName);
-            ++skippedLines;
-            return;
-          } else {
-            prevState = part.state;
-            ++numMultilines;
-            multilineDoc.putAll(part.part);
-
-            if (multilineDoc.isEmpty()) {
-              log.error("No fields read by multi-line parser for lines: "+multilineStart+" to "+lineNum+" in "+fileName);
-              skippedLines += numMultilines;
-              numMultilines = 0;
-              multilineStart = 0;
-              return;
-            }
-
-            // invoke a callback on the parser to allow any post-processing
-            // it might need to do once all lines have been parsed for this event
-            multilineParser.afterAllLinesRead(multilineDoc);
-
-            doc = new HashMap<String,Object>();
-            doc.putAll(multilineDoc);
-            multilineDoc.clear();
-            linesParsed.inc(numMultilines);
-            numMultilines = 0;
-            multilineStart = 0;
-          }
-        } catch (Exception exc) {
-          log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
-          return;
-        }
+      if (multilineSupport != null) {
+        doc = multilineSupport.nextLine(line, fileName, lineNum);
       } else {
         try {
           doc = logIndexer.parseLogLine(fileName, lineNum, line);
         } catch (Exception exc) {
           // TODO: guard against flood of errors here
-          log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
+          log.error("Failed to parse line "+lineNum+" in " + fileName+" due to: "+exc);
         }
       }
 
@@ -930,11 +889,13 @@ public class LogIndexer {
         // queue this doc to be consumed by a Fusion sender thread
         docsToIndexQueue.offer(doc);
         docCounter.inc();
-        if (multilineParser == null) {
+        if (multilineSupport == null) {
           linesParsed.inc();
         }
       } else {
-        ++skippedLines;
+        if (multilineSupport == null) {
+          ++skippedLines;
+        }
       }
 
       if (lineNum > 10000) {
@@ -990,6 +951,12 @@ public class LogIndexer {
 
         while (scanner.hasNext())
           handle(scanner.next());
+        afterLastLine();
+
+        // the multiline processor keeps track of skipped lines
+        if (multilineSupport != null) {
+          this.skippedLines = multilineSupport.skippedLines;
+        }
 
       } catch (IOException ioExc) {
         log.error("Failed to process " + fileToParse.getAbsolutePath() + " due to: " + ioExc);
@@ -1002,6 +969,122 @@ public class LogIndexer {
       }
 
       logIndexer.onFinishedParsingFile(fileName, lineNum, skippedLines, System.currentTimeMillis() - startMs);
+    }
+  }
+
+  /**
+   * Class keeps track of state while parsing multi-line log entries
+   */
+  class MultilineSupport {
+    MultilineParser multilineParser;
+    Map<String,Object> multilineDoc = new HashMap<String,Object>();
+    int numMultilines = 0;
+    int multilineStart = 0;
+    int skippedLines = 0;
+    MultilinePart.MultilineState prevState = MultilinePart.MultilineState.END;
+
+    MultilineSupport(MultilineParser parser) {
+      this.multilineParser = parser;
+    }
+
+    // called after the log reader has encountered the last line in a file
+    // this is necessary for multi-line parsers that don't have an explicit "end" event, such as a stack trace
+    // as opposed to parsing something like XML that has a specific end tag
+    Map<String,Object> afterLastLine() {
+      if (prevState == MultilinePart.MultilineState.END)
+        return null; // multi-line logs with an actual start and end events don't need the after last-line check
+
+      Map<String,Object> doc = null;
+      if (!multilineDoc.isEmpty()) {
+        // invoke a callback on the parser to allow any post-processing
+        // it might need to do once all lines have been parsed for this event
+        multilineParser.afterAllLinesRead(multilineDoc);
+
+        doc = new HashMap<>();
+        doc.putAll(multilineDoc);
+        multilineDoc.clear();
+        linesParsed.inc(numMultilines);
+        numMultilines = 0;
+        multilineStart = 0;
+      }
+      return doc;
+    }
+
+    // process the next line read from the log file, it may be the start of a new log entry or the continuation of
+    // the current log entry
+    Map<String,Object> nextLine(String line, String fileName, int lineNum) {
+
+      Map<String,Object> doc = null;
+      try {
+        MultilinePart part = multilineParser.parseNextPart(fileName, lineNum, line);
+        if (log.isDebugEnabled())
+          log.debug(lineNum + ": " + part);
+
+        if (part.state == MultilinePart.MultilineState.START) {
+          // if we see a START event but the buffer has lines, then we need to
+          // end the current multi-line log entry before starting new
+          if (!multilineDoc.isEmpty()) {
+            multilineParser.afterAllLinesRead(multilineDoc);
+            doc = new HashMap<>();
+            doc.putAll(multilineDoc);
+            multilineDoc.clear();
+            linesParsed.inc(numMultilines);
+            startOfNewLogEntry(part, lineNum);
+            return doc;
+          } else {
+            startOfNewLogEntry(part, lineNum);
+            return null;  // must return to keep parsing lines of this multiline log entry
+          }
+        } else if (part.state == MultilinePart.MultilineState.CONT) {
+          prevState = part.state;
+          ++numMultilines;
+          multilineDoc.putAll(part.part);
+        } else if (part.state == MultilinePart.MultilineState.SKIP) {
+          prevState = part.state;
+          log.warn("Multi-line parser " + multilineParser.toString() + " skipped line " + lineNum + " in " + fileName);
+          ++skippedLines;
+        } else {
+          // END event here
+          prevState = part.state;
+
+          ++numMultilines;
+          multilineDoc.putAll(part.part);
+
+          if (multilineDoc.isEmpty()) {
+            log.error("No fields read by multi-line parser for lines: " + multilineStart+" to "+lineNum+" in "+fileName+"; part="+part);
+            skippedLines += numMultilines;
+            numMultilines = 0;
+            multilineStart = 0;
+            return null;
+          }
+
+          // invoke a callback on the parser to allow any post-processing
+          // it might need to do once all lines have been parsed for this event
+          multilineParser.afterAllLinesRead(multilineDoc);
+
+          doc = new HashMap<>();
+          doc.putAll(multilineDoc);
+          multilineDoc.clear();
+          linesParsed.inc(numMultilines);
+          numMultilines = 0;
+          multilineStart = 0;
+        }
+      } catch (Exception exc) {
+        log.error("Failed to parse line "+lineNum+" in "+fileName+" due to: "+exc);
+        return null;
+      }
+
+      return doc;
+    }
+
+    // reset state correctly for processing a new log entry
+    protected void startOfNewLogEntry(MultilinePart part, int lineNum) {
+      prevState = part.state;
+      multilineStart = lineNum;
+      numMultilines = 0;
+      multilineDoc.clear();
+      ++numMultilines;
+      multilineDoc.putAll(part.part);
     }
   }
 
