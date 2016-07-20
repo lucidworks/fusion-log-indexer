@@ -88,7 +88,7 @@ public class FusionPipelineClient {
     cookieStore = new BasicCookieStore();
 
     this.fusionUser = fusionUser;
-    this.fusionPass = fusionPass.getBytes(StandardCharsets.UTF_8);
+    this.fusionPass = (fusionPass != null) ? fusionPass.getBytes(StandardCharsets.UTF_8) : null;
     this.fusionRealm = fusionRealm;
 
     // build the HttpClient to be used for all requests
@@ -435,6 +435,11 @@ public class FusionPipelineClient {
 
     HttpEntity entity = null;
     try {
+      if (endpoint.indexOf("?") != -1) {
+        endpoint += "&echo=false";
+      } else {
+        endpoint += "?echo=false";
+      }
       HttpPost postRequest = new HttpPost(endpoint);
 
       // stream the json directly to the HTTP output

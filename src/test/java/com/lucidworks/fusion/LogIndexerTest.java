@@ -51,7 +51,7 @@ public class LogIndexerTest {
     fusionEndpoints = fusionHostAndPort + fusionPipelineEndpoint;
 
     // mock out the Fusion indexing pipeline endpoint and the session API endpoint
-    stubFor(post(urlEqualTo(fusionPipelineEndpoint)).willReturn(aResponse().withStatus(200)));
+    stubFor(post(urlEqualTo(fusionPipelineEndpoint+"?echo=false")).willReturn(aResponse().withStatus(200)));
     stubFor(post(urlEqualTo("/api/session?realmName=" + fusionRealm)).willReturn(aResponse().withStatus(200)));
   }
 
