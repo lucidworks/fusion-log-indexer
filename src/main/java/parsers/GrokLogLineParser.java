@@ -156,7 +156,11 @@ public class GrokLogLineParser implements LogLineParser {
     if (dateFieldName != null) {
       Object dateFieldValue = grokMap.get(dateFieldName);
       if (dateFieldValue != null) {
-        timestamp = df.get().parse((String)dateFieldValue);
+        try {
+          timestamp = df.get().parse((String) dateFieldValue);
+        } catch (ParseException pe) {
+          log.warn("Failed to parse '"+dateFieldValue+"' into a Date using dateFieldFormat="+dateFieldFormat+" due to: "+pe);
+        }
       }
     }
     return timestamp;

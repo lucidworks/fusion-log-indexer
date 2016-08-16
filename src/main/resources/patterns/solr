@@ -4,3 +4,5 @@ SOLR_LOG %{LOGLEVEL}\s+-\s%{TIMESTAMP_ISO8601};\s%{JAVACLASS};\s+%{MESSAGE:messa
 
 SOLR_6_LOG4J %{TIMESTAMP_ISO8601:logdate} %{LOGLEVEL:level_s} \(%{DATA:thread_s}\) \[(?:%{DATA:mdc_s}| )\] %{DATA:category_s} %{JAVALOGMESSAGE:logmessage}
 SOLR_6_REQUEST \[%{DATA:core_node_name_s}\] webapp=\/%{WORD:webapp_s} path=\/%{DATA:path_s} params=\{%{GREEDYDATA:params_s}\} hits=%{NUMBER:hits_i} status=%{NUMBER:status_i} QTime=%{NUMBER:qtime_i}
+
+SOLR_JENKINS_LOG4J %{TIMESTAMP_ISO8601:logdate} - %{LOGLEVEL:level_s} \[%{DATA:thread_s}\:%{DATA:category_s}\@%{DATA:line_i}\] - \{(?:%{DATA:mdc_s}|)\} - %{JAVALOGMESSAGE:logmessage}
