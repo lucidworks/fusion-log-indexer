@@ -876,6 +876,9 @@ public class LogIndexer {
       Map<String,Object> doc = null;
       if (multilineSupport != null) {
         doc = multilineSupport.nextLine(line, fileName, lineNum);
+        if (doc != null) {
+          doc = buildPipelineDocFromMap(doc, fileName, lineNum);
+        }
       } else {
         try {
           doc = logIndexer.parseLogLine(fileName, lineNum, line);
