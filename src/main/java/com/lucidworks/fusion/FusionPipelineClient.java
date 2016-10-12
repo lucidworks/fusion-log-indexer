@@ -444,7 +444,7 @@ public class FusionPipelineClient {
 
       // stream the json directly to the HTTP output
       EntityTemplate et = new EntityTemplate(new JacksonContentProducer(jsonObjectMapper, docs));
-      et.setContentType("application/vnd.lucidworks-document");
+      et.setContentType("application/json"); //"application/vnd.lucidworks-document");
       et.setContentEncoding(StandardCharsets.UTF_8.name());
       postRequest.setEntity(et); // new BufferedHttpEntity(et));
 
