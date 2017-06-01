@@ -4,6 +4,8 @@ import com.codahale.metrics.ConsoleReporter;
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistry;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.GnuParser;
 import org.apache.commons.cli.HelpFormatter;
@@ -131,8 +133,8 @@ public class LogIndexer {
             OptionBuilder
                     .withArgName("URL(s)")
                     .hasArg()
-                    .isRequired(true)
-                    .withDescription("Fusion endpoint(s)")
+                    .isRequired(false)
+                    .withDescription("Fusion endpoint(s); required unless using -parseOnly")
                     .create("fusion"),
             OptionBuilder
                     .withArgName("USERNAME")
@@ -257,6 +259,8 @@ public class LogIndexer {
   private ConsoleReporter reporter = null;
   protected String charsetName = null;
   protected String lineDelimiter = null;
+  protected boolean parseOnly = false;
+  protected ObjectMapper jsonObjectMapper = new ObjectMapper();
 
   protected Queue<Map> docsToIndexQueue;
 
@@ -330,8 +334,13 @@ public class LogIndexer {
     String alreadyProcessedFiles = cli.getOptionValue("alreadyProcessedFiles");
     int restartAtLine = 0;
 
+    parseOnly = cli.hasOption("parseOnly");
+    if (parseOnly) {
+      log.info("parseOnly flag is set; indexing disabled.");
+    }
+
     final String fusionEndpoints = cli.getOptionValue("fusion");
-    final boolean fusionAuthEnabled = "true".equalsIgnoreCase(cli.getOptionValue("fusionAuthEnabled", "true"));
+    final boolean fusionAuthEnabled = !parseOnly && "true".equalsIgnoreCase(cli.getOptionValue("fusionAuthEnabled", "true"));
     final String fusionUser = cli.getOptionValue("fusionUser", "admin");
     String fusionPass = cli.getOptionValue("fusionPass");
     if (fusionAuthEnabled && (fusionPass == null || fusionPass.isEmpty())) {
@@ -369,17 +378,20 @@ public class LogIndexer {
             ConcurrentQueueSpec.createBoundedMpmc(Integer.parseInt(cli.getOptionValue("docsToIndexQueueSize", "1000000")));
     docsToIndexQueue = QueueFactory.newQueue(queueSpec);
 
-    String senderThreads = cli.getOptionValue("senderThreads");
-    int numFusionEndpoints = fusionEndpoints.split(",").length;
-    int numSenderThreads = (senderThreads != null) ? Integer.parseInt(senderThreads) : 2*numFusionEndpoints;
     int pollQueueTimeMs = Integer.parseInt(cli.getOptionValue("pollQueueTimeMs","200"));
 
-    boolean parseOnly = cli.hasOption("parseOnly");
-
     try {
-      Sender[] senders = new Sender[numSenderThreads];
-      ExecutorService senderThreadPool = Executors.newFixedThreadPool(numSenderThreads);
-      if (!parseOnly) {
+      Sender[] senders;
+      ExecutorService senderThreadPool;
+      if (parseOnly) {
+        senders = new Sender[1];
+        senderThreadPool = Executors.newFixedThreadPool(1);
+      } else {
+        String senderThreads = cli.getOptionValue("senderThreads");
+        int numFusionEndpoints = fusionEndpoints.split(",").length;
+        int numSenderThreads = (senderThreads != null) ? Integer.parseInt(senderThreads) : 2*numFusionEndpoints;
+        senders = new Sender[numSenderThreads];
+
         fusion = fusionAuthEnabled ?
                 new FusionPipelineClient(fusionEndpoints, fusionUser, fusionPass, fusionRealm) :
                 new FusionPipelineClient(fusionEndpoints);
@@ -388,19 +400,20 @@ public class LogIndexer {
         // setup a pool of sender threads ...
         for (int s=0; s < senders.length; s++)
           senders[s] = new Sender(docsToIndexQueue, pollQueueTimeMs, fusion, fusionBatchSize, linesProcessed);
+        senderThreadPool = Executors.newFixedThreadPool(numSenderThreads);
         for (int s=0; s < senders.length; s++)
           senderThreadPool.submit(senders[s]);
         log.info("Created "+numSenderThreads+" sender threads (queue consumers) to send docs to "+numFusionEndpoints+" Fusion endpoints.");
       }
 
-      processLogDir(fusion, logDir, matchedLogFiles, matchLogsPattern, alreadyProcessedFiles, restartAtLine);
+      processLogDir(logDir, matchedLogFiles, matchLogsPattern, alreadyProcessedFiles);
 
       if (!parseOnly && !watch) {
 
         for (int s=0; s < senders.length; s++)
           senders[s].stopRunning();
 
-        log.info("No more log events being queued ... waiting until all "+numSenderThreads+" sender threads complete their work.");
+        log.info("No more log events being queued ... waiting until all "+senders.length+" sender threads complete their work.");
         shutdownAndAwaitTermination(senderThreadPool);
 
         if (!docsToIndexQueue.isEmpty()) {
@@ -501,12 +514,7 @@ public class LogIndexer {
     return files;
   }
 
-  protected void processLogDir(FusionPipelineClient fusion, 
-                               File logDir, 
-                               File[] matchedLogFiles,
-                               Pattern matchLogFilePattern,
-                               String alreadyProcessedFiles, 
-                               int restartAtLine)
+  protected void processLogDir(File logDir, File[] matchedLogFiles, Pattern matchLogFilePattern, String alreadyProcessedFiles)
           throws Exception
   {
     List<File> sortedLogFiles = getFilesToParse(matchedLogFiles, matchLogFilePattern);
@@ -639,7 +647,6 @@ public class LogIndexer {
   }
 
   protected Map<String,Object> buildPipelineDocFromMap(Map grokMap, String fileName, int lineNum) {
-    String docId = null;
     Object idObj = grokMap.get(idFieldName);
     boolean hasIdField = false;
 
@@ -647,6 +654,7 @@ public class LogIndexer {
       lineNum = (Integer)grokMap.get("line_i");
     }
 
+    String docId;
     if (idObj != null) {
       docId = idObj.toString();
       hasIdField = true;
@@ -666,6 +674,15 @@ public class LogIndexer {
       fields.add(mapField("_src_", String.format("%s:%d", fileName, lineNum)));
     }
     doc.put("fields", fields);
+
+    if (parseOnly) {
+      try {
+        log.info("Created PipelineDoc for "+fileName+":"+lineNum+":\n"+jsonObjectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(doc)+"\n");
+      } catch (JsonProcessingException e) {
+        log.error(e.getMessage(),e);
+      }
+    }
+
     return doc;
   }
 

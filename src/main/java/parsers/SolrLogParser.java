@@ -62,11 +62,13 @@ public class SolrLogParser extends GrokLogLineParser implements MultilineParser 
 
   protected String logMessageFieldName;
   protected Grok requestGrok;
+  protected boolean parseParams = true;
 
   public void init(Properties config) throws Exception {
     super.init(config);
 
     logMessageFieldName = config.getProperty("logMessageFieldName", DEFAULT_LOG_MESSAGE_FIELD);
+    parseParams = "true".equals(config.getProperty("parseParams", "true"));
 
     // setup another grok for parsing request log entries into more fine-grained fields
     Properties requestGrokConfig = (Properties)config.clone();
@@ -141,9 +143,11 @@ public class SolrLogParser extends GrokLogLineParser implements MultilineParser 
     // if this message looks like a request message (such as a query), try to parse out the additional fields
     String category = (String)mutable.get("category_s");
     String message = (String)mutable.get(logMessageFieldName);
-    if ("o.a.s.c.S.Request".equals(category) && message != null) {
+    if (("o.a.s.c.S.Request".equals(category) || "org.apache.solr.core.SolrCore".equals(category)) && message != null) {
       // see if this request line matches the Solr request format to parse out additional fields like query params
-      Match requestMatch = requestGrok.match(message.replaceAll("\\s+"," ").trim());
+
+      String requestPart = message.replaceAll("\\s+"," ").trim();
+      Match requestMatch = requestGrok.match(requestPart);
       requestMatch.captures();
       if (!requestMatch.isNull()) {
         Map<String,Object> requestMap = requestMatch.toMap();
@@ -152,6 +156,26 @@ public class SolrLogParser extends GrokLogLineParser implements MultilineParser 
         String rpat = requestGrok.getOriginalGrokPattern();
         requestMap.remove(rpat.substring(2,rpat.length()-1));
         mutable.putAll(requestMap);
+
+        if (parseParams) {
+          String params_s = (String)requestMap.get("params_s");
+          if (params_s != null) {
+            String[] pairs = params_s.split("&");
+            for (String nvp : pairs) {
+              int eqAt = nvp.indexOf("=");
+              if (eqAt != -1) {
+                String key = nvp.substring(0,eqAt);
+                String value = nvp.substring(eqAt+1);
+                if (!"_".equals(key)) {
+                  if (!key.endsWith("_s")) {
+                    key += "_s";
+                  }
+                  mutable.put(key, value);
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
