@@ -642,6 +642,11 @@ public class LogIndexer {
     String docId = null;
     Object idObj = grokMap.get(idFieldName);
     boolean hasIdField = false;
+
+    if (grokMap.containsKey("line_i")) {
+      lineNum = (Integer)grokMap.get("line_i");
+    }
+
     if (idObj != null) {
       docId = idObj.toString();
       hasIdField = true;
@@ -847,6 +852,7 @@ public class LogIndexer {
       if (multilineSupport != null) {
         Map<String,Object> doc = multilineSupport.afterLastLine();
         if (doc != null) {
+          doc = buildPipelineDocFromMap(doc, fileName, lineNum);
           docsToIndexQueue.offer(doc);
           docCounter.inc();
         }
@@ -1088,6 +1094,7 @@ public class LogIndexer {
       multilineDoc.clear();
       ++numMultilines;
       multilineDoc.putAll(part.part);
+      multilineDoc.put("line_i", part.lineNum);
     }
   }
 

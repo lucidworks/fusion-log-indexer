@@ -87,7 +87,7 @@ public class SolrLogParser extends GrokLogLineParser implements MultilineParser 
       // treat a non-match as a continuation of the previous log entry, like a stacktrace
       StringBuilder sb = msgBuilder.get();
       sb.append(" ").append(line);
-      return new MultilinePart(CONT, Collections.singletonMap(logMessageFieldName, (Object)sb.toString()));
+      return new MultilinePart(CONT, Collections.singletonMap(logMessageFieldName, (Object)sb.toString()), lineNum);
     }
 
     // the line matches our grok pattern
@@ -121,7 +121,7 @@ public class SolrLogParser extends GrokLogLineParser implements MultilineParser 
       grokMap.remove("logmessage");
     }
 
-    return new MultilinePart(START, pruneEmpty(grokMap));
+    return new MultilinePart(START, pruneEmpty(grokMap), lineNum);
   }
 
   @Override
