@@ -11,16 +11,15 @@ import com.github.tomakehurst.wiremock.junit.WireMockRule;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.Map;
 import java.util.Random;
 
-import org.apache.commons.io.FileUtils;
 import parsers.DnsLogLineParser;
+import parsers.SolrLogParser;
+import parsers.XmlMultilineParser;
 
 public class LogIndexerTest {
 
@@ -43,7 +42,7 @@ public class LogIndexerTest {
   public void setupTest() {
     testDataDir = new File("src/test/test-data");
     if (!testDataDir.isDirectory())
-      fail("Request test data directory "+testDataDir.getAbsolutePath()+" not found!");
+      fail("Request test data directory " + testDataDir.getAbsolutePath() + " not found!");
 
     fusionApiPort = wireMockRule.port();
     fusionHostAndPort = "http://" + fusionHost + ":" + fusionApiPort;
@@ -51,13 +50,13 @@ public class LogIndexerTest {
     fusionEndpoints = fusionHostAndPort + fusionPipelineEndpoint;
 
     // mock out the Fusion indexing pipeline endpoint and the session API endpoint
-    stubFor(post(urlEqualTo(fusionPipelineEndpoint+"?echo=false")).willReturn(aResponse().withStatus(200)));
+    stubFor(post(urlEqualTo(fusionPipelineEndpoint + "?echo=false")).willReturn(aResponse().withStatus(200)));
     stubFor(post(urlEqualTo("/api/session?realmName=" + fusionRealm)).willReturn(aResponse().withStatus(200)));
   }
 
   @After
   public void tearDownTest() {
-    File tmp = new File(testDataDir.getName()+"-data_processed_files_v2");
+    File tmp = new File(testDataDir.getName() + "-data_processed_files_v2");
     if (tmp.isFile())
       tmp.delete();
   }
@@ -65,18 +64,16 @@ public class LogIndexerTest {
   //@Ignore
   @Test
   public void testDnsLog() throws Exception {
-
-    /*
     SimpleDateFormat syslogtimestamp = new SimpleDateFormat("MMM dd HH:mm:ss");
     SimpleDateFormat ts_w_dayOfWeek = new SimpleDateFormat("EEE");
     Random random = new Random(5150);
     OutputStreamWriter osw = null;
     try {
-      osw = new OutputStreamWriter(new FileOutputStream(new File(testDataDir,"dns_log")), StandardCharsets.UTF_8);
+      osw = new OutputStreamWriter(new FileOutputStream(new File(testDataDir, "dns_log")), StandardCharsets.UTF_8);
       StringBuilder sb = new StringBuilder();
 
-      for (int i=0; i < 30000; i++) {
-        Date logdate = new Date(1449619200000L + (i*1000));
+      for (int i = 0; i < 30000; i++) {
+        Date logdate = new Date(1449619200000L + (i * 1000));
         sb.append(syslogtimestamp.format(logdate));
         sb.append(" dns-server.example.net MSWinEventLog");
         sb.append("|");
@@ -84,7 +81,7 @@ public class LogIndexerTest {
         sb.append("|");
         sb.append("Application");
         sb.append("|");
-        sb.append(i+10000);
+        sb.append(i + 10000);
         sb.append("|");
         sb.append(ts_w_dayOfWeek.format(logdate));
         sb.append(" ");
@@ -108,7 +105,7 @@ public class LogIndexerTest {
         sb.append("|");
         sb.append("client " + random.nextInt(256) + "." + random.nextInt(256) + "." + random.nextInt(256) + "." + random.nextInt(256));
         sb.append("#").append(random.nextInt(100000));
-        sb.append(": query: ").append("a"+random.nextInt(100)+".lucidworks.com");
+        sb.append(": query: ").append("a" + random.nextInt(100) + ".lucidworks.com");
         sb.append(" IN ").append(random.nextInt(256) + "." + random.nextInt(256) + "." + random.nextInt(256) + "." + random.nextInt(256));
         sb.append("\n");
         osw.write(sb.toString());
@@ -119,17 +116,17 @@ public class LogIndexerTest {
       if (osw != null) {
         try {
           osw.close();
-        } catch (Exception ignore){}
+        } catch (Exception ignore) {
+        }
       }
     }
-    */
-
-    String[] args = new String[] {
-            "-fusionUser",fusionUser,
-            "-fusionPass",fusionPass,
-            "-fusionRealm",fusionRealm,
-            "-fusion",fusionEndpoints,
-            "-dir",testDataDir.getAbsolutePath(),
+    String subDir = "/dns/";
+    String[] args = new String[]{
+            "-fusionUser", fusionUser,
+            "-fusionPass", fusionPass,
+            "-fusionRealm", fusionRealm,
+            "-fusion", fusionEndpoints,
+            "-dir", testDataDir.getAbsolutePath() + subDir,
             "-match", "^dns_log$",
             "-lineParserClass", DnsLogLineParser.class.getName()
     };
@@ -141,13 +138,13 @@ public class LogIndexerTest {
   //@Ignore
   @Test
   public void testHttpdAccessLog() throws Exception {
-
-    String[] args = new String[] {
-            "-fusionUser",fusionUser,
-            "-fusionPass",fusionPass,
-            "-fusionRealm",fusionRealm,
-            "-fusion",fusionEndpoints,
-            "-dir",testDataDir.getAbsolutePath()
+    String subDir = "/httpd_access/";
+    String[] args = new String[]{
+            "-fusionUser", fusionUser,
+            "-fusionPass", fusionPass,
+            "-fusionRealm", fusionRealm,
+            "-fusion", fusionEndpoints,
+            "-dir", testDataDir.getAbsolutePath() + subDir
     };
     CommandLine cli = LogIndexer.processCommandLineArgs(args);
     LogIndexer logIndexer = new LogIndexer();
@@ -158,30 +155,30 @@ public class LogIndexerTest {
     assertTrue(logIndexer.docCounter.getCount() == 1536);
     assertTrue(logIndexer.totalSkippedLines.getCount() == 0);
 
-    File tmp = new File("test-data_processed_files_v2");
+    File tmp = new File(testDataDir.getName() + "-data_processed_files_v2");
     if (tmp.isFile())
       tmp.delete();
 
     LogIndexer.log.info("\n\n");
 
-    args = new String[] {
-            "-fusionUser",fusionUser,
-            "-fusionPass",fusionPass,
-            "-fusionRealm",fusionRealm,
-            "-fusion",fusionEndpoints,
-            "-dir",testDataDir.getAbsolutePath(),
-            "-match","*.gz"
+    args = new String[]{
+            "-fusionUser", fusionUser,
+            "-fusionPass", fusionPass,
+            "-fusionRealm", fusionRealm,
+            "-fusion", fusionEndpoints,
+            "-dir", testDataDir.getAbsolutePath() + subDir,
+            "-match", "*.gz"
     };
     cli = LogIndexer.processCommandLineArgs(args);
     logIndexer = new LogIndexer();
     logIndexer.run(cli);
 
     // do some asserts based on the httpd_access.log
-    assertTrue("Expected 1 files parsed, but found "+logIndexer.parsedFiles.getCount(), logIndexer.parsedFiles.getCount() == 1);
+    assertTrue("Expected 1 files parsed, but found " + logIndexer.parsedFiles.getCount(), logIndexer.parsedFiles.getCount() == 1);
     assertTrue(logIndexer.docCounter.getCount() == 1536);
     assertTrue(logIndexer.totalSkippedLines.getCount() == 0);
 
-    tmp = new File("test-data_processed_files_v2");
+    tmp = new File(testDataDir.getName() + "-data_processed_files_v2");
     if (tmp.isFile())
       tmp.delete();
 
@@ -227,5 +224,78 @@ public class LogIndexerTest {
     logIndexer = new LogIndexer();
     logIndexer.run(cli);
     */
+  }
+
+  // TODO: tests for grok log line, json log line, log line, multiline, no-op log line, solr log, xml multiline
+  //@Ignore
+  @Test
+  public void testSolrDoc() throws Exception {
+    String subDir = "/xml/";
+    String[] args = new String[]{
+            "-fusionUser", fusionUser,
+            "-fusionPass", fusionPass,
+            "-fusionRealm", fusionRealm,
+            "-fusion", fusionEndpoints,
+            "-dir", testDataDir.getAbsolutePath() + subDir,
+            "-match", "*.xml",
+            "-lineParserClass", XmlMultilineParser.class.getName()
+    };
+    CommandLine cli = LogIndexer.processCommandLineArgs(args);
+    LogIndexer logIndexer = new LogIndexer();
+    logIndexer.run(cli);
+    // do some asserts based on the solr-add-doc.xml
+    assertTrue("Expected 1 files parsed, but found " + logIndexer.parsedFiles.getCount(), logIndexer.parsedFiles.getCount() == 1);
+    assertTrue(logIndexer.docCounter.getCount() == 6);
+    assertTrue(logIndexer.totalSkippedLines.getCount() == 2);
+
+    File tmp = new File(testDataDir.getName() + "-data_processed_files_v2");
+    if (tmp.isFile())
+      tmp.delete();
+  }
+
+  @Test
+  public void testSolrLog() throws Exception {
+    String subDir = "/solr/";
+    String[] args = new String[]{
+            "-fusionUser", fusionUser,
+            "-fusionPass", fusionPass,
+            "-fusionRealm", fusionRealm,
+            "-fusion", fusionEndpoints,
+            "-dir", testDataDir.getAbsolutePath() + subDir,
+            "-match", "solr.log",
+            "-lineParserClass", SolrLogParser.class.getName()
+    };
+    CommandLine cli = LogIndexer.processCommandLineArgs(args);
+    LogIndexer logIndexer = new LogIndexer();
+    logIndexer.run(cli);
+
+    assertTrue("Expected 1 files parsed, but found " + logIndexer.parsedFiles.getCount(), logIndexer.parsedFiles.getCount() == 1);
+    assertTrue(logIndexer.linesParsed.getCount() == 3262);
+    assertTrue(logIndexer.totalSkippedLines.getCount() == 0);
+
+    File tmp = new File(testDataDir.getAbsolutePath() + "-data_processed_files_v2");
+    if (tmp.isFile())
+      tmp.delete();
+
+    args = new String[]{
+            "-fusionUser", fusionUser,
+            "-fusionPass", fusionPass,
+            "-fusionRealm", fusionRealm,
+            "-fusion", fusionEndpoints,
+            "-dir", testDataDir.getAbsolutePath() + subDir,
+            "-match", "*.log",
+            "-lineParserClass", SolrLogParser.class.getName()
+    };
+    cli = LogIndexer.processCommandLineArgs(args);
+    logIndexer = new LogIndexer();
+    logIndexer.run(cli);
+
+    assertTrue("Expected 2 files parsed, but found " + logIndexer.parsedFiles.getCount(), logIndexer.parsedFiles.getCount() == 2);
+    assertTrue(logIndexer.linesParsed.getCount() == 6524);
+    assertTrue(logIndexer.totalSkippedLines.getCount() == 0);
+
+    tmp = new File(testDataDir.getName() + "-data_processed_files_v2");
+    if (tmp.isFile())
+      tmp.delete();
   }
 }

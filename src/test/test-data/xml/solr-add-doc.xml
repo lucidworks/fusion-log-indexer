@@ -1,0 +1,44 @@
+<add>
+    <doc>
+        <field name = "id">001</field>
+        <field name = "first name">Rajiv</field>
+        <field name = "last name">Reddy</field>
+        <field name = "phone">9848022337</field>
+        <field name = "city">Hyderabad</field>
+    </doc>
+    <doc>
+        <field name = "id">002</field>
+        <field name = "first name">Siddarth</field>
+        <field name = "last name">Battacharya</field>
+        <field name = "phone">9848022338</field>
+        <field name = "city">Kolkata</field>
+    </doc>
+    <doc>
+        <field name = "id">003</field>
+        <field name = "first name">Rajesh</field>
+        <field name = "last name">Khanna</field>
+        <field name = "phone">9848022339</field>
+        <field name = "city">Delhi</field>
+    </doc>
+    <doc>
+        <field name = "id">004</field>
+        <field name = "first name">Preethi</field>
+        <field name = "last name">Agarwal</field>
+        <field name = "phone">9848022330</field>
+        <field name = "city">Pune</field>
+    </doc>
+    <doc>
+        <field name = "id">005</field>
+        <field name = "first name">Trupthi</field>
+        <field name = "last name">Mohanthy</field>
+        <field name = "phone">9848022336</field>
+        <field name = "city">Bhuwaeshwar</field>
+    </doc>
+    <doc>
+        <field name = "id">006</field>
+        <field name = "first name">Archana</field>
+        <field name = "last name">Mishra</field>
+        <field name = "phone">9848022335</field>
+        <field name = "city">Chennai</field>
+    </doc>
+</add>
